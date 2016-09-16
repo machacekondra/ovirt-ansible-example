@@ -1,0 +1,77 @@
+---
+- name: Destroy demo oVirt environment
+  hosts: ovirt
+  tasks:
+  - name: Include oVirt password
+    no_log: true
+    include_vars: ovirt_password.yml
+
+  - name: Obtain SSO token
+    ovirt_auth:
+      url: "{{ url }}"
+      username: "{{ username }}"
+      password: "{{ password }}"
+      ca_file: "{{ ca_file }}"
+
+  - name: Create and run VM from template
+    ovirt_vms:
+      auth: "{{ ovirt_auth }}"
+      state: absent
+      name: "{{ vm }}"
+
+  - name: Remove template
+    ovirt_templates:
+      auth: "{{ ovirt_auth }}"
+      state: absent
+      name: "{{ template }}"
+
+  - name: Remove ISO NFS storage domain
+    ovirt_storage_domains:
+      auth: "{{ ovirt_auth }}"
+      name: "{{ iso_name }}"
+      state: absent
+      data_center: "{{ datacenter }}"
+      host: "{{ host }}"
+
+  - name: Remove export NFS storage domain
+    ovirt_storage_domains:
+      auth: "{{ ovirt_auth }}"
+      name: "{{ export_name }}"
+      state: absent
+      data_center: "{{ datacenter }}"
+      host: "{{ host }}"
+
+  - name: Deactivate master data NFS storage domain
+    ovirt_storage_domains:
+      auth: "{{ ovirt_auth }}"
+      name: "{{ data_name }}"
+      state: maintenance
+      data_center: "{{ datacenter }}"
+    # Ignore errors, since data may not exists
+    # and we don't want to create it:
+    ignore_errors: yes
+
+  - name: Remove datacenter
+    ovirt_datacenters:
+      auth: "{{ ovirt_auth }}"
+      state: absent
+      name: "{{ datacenter }}"
+
+  - name: Remove data NFS storage domain
+    ovirt_storage_domains:
+      auth: "{{ ovirt_auth }}"
+      name: "{{ data_name }}"
+      state: absent
+      host: "{{ host }}"
+
+  - name: Remove hosts
+    ovirt_hosts:
+      auth: "{{ ovirt_auth }}"
+      state: absent
+      name: "{{ host }}"
+
+  - name: Remove cluster
+    ovirt_clusters:
+      auth: "{{ ovirt_auth }}"
+      state: absent
+      name: "{{ cluster }}"

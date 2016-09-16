@@ -1,0 +1,108 @@
+---
+- name: Setup oVirt environment
+  hosts: ovirt
+  tasks:
+    - block:
+        - name: Include oVirt password
+          no_log: true
+          include_vars: ovirt_password.yml
+
+        - name: Obtain SSO token
+          no_log: false
+          ovirt_auth:
+            url: "{{ url }}"
+            username: "{{ username }}"
+            password: "{{ password }}"
+            ca_file: "{{ ca_file }}"
+
+        - name: Create datacenter
+          ovirt_datacenters:
+            auth: "{{ ovirt_auth }}"
+            name: "{{ datacenter }}"
+            description: mydatacenter
+            local: false
+            compatibility_version: 4.0
+            quota_mode: disabled
+
+        - name: Create cluster
+          ovirt_clusters:
+            auth: "{{ ovirt_auth }}"
+            datacenter_name: "{{ datacenter }}"
+            name: "{{ cluster }}"
+            cpu_type: Intel SandyBridge Family
+            description: mycluster
+            compatibility_version: 4.0
+
+        - name: Add host using public key
+          ovirt_hosts:
+            auth: "{{ ovirt_auth }}"
+            public_key: true
+            cluster: "{{ cluster }}"
+            name: "{{ host }}"
+            address: "{{ host_address }}"
+
+        - name: Add data NFS storage domain
+          ovirt_storage_domains:
+            auth: "{{ ovirt_auth }}"
+            name: "{{ data_name }}"
+            host: "{{ host }}"
+            data_center: "{{ datacenter }}"
+            nfs:
+              address: 10.34.63.199
+              path: /omachace/data
+
+        - name: Import export NFS storage domain
+          ovirt_storage_domains:
+            auth: "{{ ovirt_auth }}"
+            name: "{{ export_name }}"
+            host: "{{ host }}"
+            domain_function: export
+            data_center: "{{ datacenter }}"
+            nfs:
+              address: 10.34.63.199
+              path: /omachace/export
+
+        - name: Create ISO NFS storage domain
+          ovirt_storage_domains:
+            auth: "{{ ovirt_auth }}"
+            name: "{{ iso_name }}"
+            host: "{{ host }}"
+            domain_function: iso
+            data_center: "{{ datacenter }}"
+            nfs:
+              address: 10.34.63.199
+              path: /omachace/iso
+
+        - name: Import template
+          ovirt_templates:
+            auth: "{{ ovirt_auth }}"
+            name: "{{ template }}"
+            state: imported
+            export_domain: "{{ export_name }}"
+            storage_domain: "{{ data_name }}"
+            cluster: "{{ cluster }}"
+
+        - name: Create and run VM from template
+          ovirt_vms:
+            auth: "{{ ovirt_auth }}"
+            name: "{{ vm }}"
+            template: "{{ template }}"
+            cluster: "{{ cluster }}"
+            memory: 1GiB
+            high_availability: true
+            cloud_init:
+              host_name: mydomain.local
+              custom_script: |
+                write_files:
+                 - content: |
+                     Hello, world!
+                   path: /tmp/greeting.txt
+                   permissions: '0644'
+              user_name: root
+              root_password: '1234567'
+
+      always:
+        - name: Revoke the SSO token
+          ovirt_auth:
+            state: absent
+            ovirt_auth: "{{ ovirt_auth }}"
