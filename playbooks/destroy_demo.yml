@@ -41,6 +41,14 @@
       data_center: "{{ datacenter }}"
       host: "{{ host }}"
 
+  - name: Remove data iSCSI storage domain
+    ovirt_storage_domains:
+      auth: "{{ ovirt_auth }}"
+      name: "{{ iscsi_name }}"
+      state: absent
+      data_center: "{{ datacenter }}"
+      host: "{{ host }}"
+
   - name: Deactivate master data NFS storage domain
     ovirt_storage_domains:
       auth: "{{ ovirt_auth }}"

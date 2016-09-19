@@ -10,6 +10,7 @@ cluster=mycluster
 host=myhost
 host_address=10.34.60.215
 data_name=data
+iscsi_name=data2
 export_name=export
 iso_name=iso
 template=rhel7

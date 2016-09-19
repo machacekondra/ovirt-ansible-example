@@ -85,12 +85,19 @@ EXAMPLES = '''
 # Examples don't contain auth parameter for simplicity,
 # look at ovirt_auth module to see how to reuse authentication:
 
-# Create host
+# Add host with username/password
 - ovirt_hosts:
     cluster: Default
     name: myhost
     address: 10.34.61.145
     password: secret
+
+# Add host using public key
+- ovirt_hosts:
+    public_key: true
+    cluster: Default
+    name: myhost2
+    address: 10.34.61.145
 
 # Maintenance
 - ovirt_hosts:

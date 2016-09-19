@@ -109,9 +109,43 @@ EXAMPLES = '''
 # Examples don't contain auth parameter for simplicity,
 # look at ovirt_auth module to see how to reuse authentication:
 
-# Create storage domain
-- ovirt_storage_domains:
+- name: Add data NFS storage domain
+  ovirt_storage_domains:
+    name: data_nfs
+    host: myhost
+    data_center: mydatacenter
+    nfs:
+      address: 10.34.63.199
+      path: /path/data
 
+- name: Add data iSCSI storage domain
+  ovirt_storage_domains:
+    name: data_iscsi
+    host: myhost
+    data_center: mydatacenter
+    iscsi:
+      target: iqn.2016-08-09.domain-01:nickname
+      lun_id: 1IET_000d0002
+      address: 10.34.63.204
+
+- name: Import export NFS storage domain
+  ovirt_storage_domains:
+    domain_function: export
+    host: myhost
+    data_center: mydatacenter
+    nfs:
+      address: 10.34.63.199
+      path: /path/export
+
+- name: Create ISO NFS storage domain
+  ovirt_storage_domains:
+    name: myiso
+    domain_function: iso
+    host: myhost
+    data_center: mydatacenter
+    nfs:
+      address: 10.34.63.199
+      path: /path/iso
 
 # Remove storage domain
 - ovirt_storage_domains:
@@ -122,8 +156,34 @@ EXAMPLES = '''
 
 class StorageDomainModule(BaseModule):
 
+    def _get_storage_type(self):
+        for sd_type in ['nfs', 'iscsi', 'posixfs', 'glusterfs', 'fcp']:
+            if self._module.params.get(sd_type) is not None:
+                return sd_type
+
+    def _get_storage(self):
+        for sd_type in ['nfs', 'iscsi', 'posixfs', 'glusterfs', 'fcp']:
+            if self._module.params.get(sd_type) is not None:
+                return self._module.params.get(sd_type)
+
+    def _login(self, storage_type, storage):
+        if storage_type == 'iscsi':
+            hosts_service = self._connection.system_service().hosts_service()
+            host = search_by_name(hosts_service, self._module.params['host'])
+            hosts_service.host_service(host.id).iscsi_login(
+                iscsi=otypes.IscsiDetails(
+                    username=storage.get('username'),
+                    password=storage.get('password'),
+                    address=storage.get('address'),
+                    target=storage.get('target'),
+                ),
+            )
+
     def build_entity(self):
-        nfs = self._module.params['nfs']
+        storage_type = self._get_storage_type()
+        storage = self._get_storage()
+        self._login(storage_type, storage)
+
         return otypes.StorageDomain(
             name=self._module.params['name'],
             description=self._module.params['description'],
@@ -135,14 +195,22 @@ class StorageDomainModule(BaseModule):
                 name=self._module.params['host'],
             ),
             storage=otypes.HostStorage(
-                type=otypes.StorageType(
-                    'nfs'
-                ),
-                address=nfs.get('address'),
-                path=nfs.get('path'),
-            ) if (
-                nfs and nfs.get('address') and nfs.get('path')
-            ) else None,
+                type=otypes.StorageType(storage_type),
+                logical_units=[
+                    otypes.LogicalUnit(
+                        id=storage.get('lun_id'),
+                        address=storage.get('address'),
+                        port=storage.get('port', 3260),
+                        target=storage.get('target'),
+                        username=storage.get('username'),
+                        password=storage.get('password'),
+                    ),
+                ] if storage_type in ['iscsi', 'fcp'] else None,
+                mount_options=storage.get('mount_options'),
+                vfs_type=storage.get('vfs_type'),
+                address=storage.get('address'),
+                path=storage.get('path'),
+            )
         )
 
     def _attached_sds_service(self):
