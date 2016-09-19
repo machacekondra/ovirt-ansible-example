@@ -25,6 +25,13 @@
       state: absent
       name: "{{ template }}"
 
+  - name: Remove image external provider
+    ovirt_external_providers:
+      state: absent
+      auth: "{{ ovirt_auth }}"
+      name: "{{ external_provider }}"
+      type: os_image
+
   - name: Remove ISO NFS storage domain
     ovirt_storage_domains:
       auth: "{{ ovirt_auth }}"
@@ -48,6 +55,7 @@
       state: absent
       data_center: "{{ datacenter }}"
       host: "{{ host }}"
+    ignore_errors: yes
 
   - name: Deactivate master data NFS storage domain
     ovirt_storage_domains:

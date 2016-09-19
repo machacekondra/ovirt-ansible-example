@@ -5,6 +5,7 @@ localhost ansible_connection=local ansible_user=root
 username=admin@internal
 url=https://ondra.local/ovirt-engine/api
 ca_file=/home/omachace/ovirt-engine4/etc/pki/ovirt-engine/ca.pem
+external_provider=myprovider
 datacenter=mydatacenter
 cluster=mycluster
 host=myhost

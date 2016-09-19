@@ -31,19 +31,19 @@ from ovirtansible.ovirt import *
 DOCUMENTATION = '''
 ---
 module: ovirt_storage_domains
-short_description: Module to create/delete storage_domains in oVirt
+short_description: Module to manage storage_domains in oVirt
 version_added: "2.2"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to create/delete storage_domains in oVirt"
+    - "Module to manage storage_domains in oVirt"
 options:
     name:
         description:
-            - "Name of the the storage domain to manage. Required if C(state) is not I(imported) storage."
+            - "Name of the the storage domain to manage."
     state:
         description:
-            - "Should the storage domain be present or absent"
-        choices: ['present', 'absent', 'attached', 'unattached', 'maintenance', 'imported']
+            - "Should the storage domain be present/absent/maintenance"
+        choices: ['present', 'absent', 'maintenance']
         default: present
     description:
         description:
