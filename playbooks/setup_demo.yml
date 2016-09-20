@@ -29,7 +29,7 @@
             auth: "{{ ovirt_auth }}"
             datacenter_name: "{{ datacenter }}"
             name: "{{ cluster }}"
-            cpu_type: Intel SandyBridge Family
+            cpu_type: Intel Nehalem Family
             description: mycluster
             compatibility_version: 4.0
 
@@ -40,6 +40,18 @@
             cluster: "{{ cluster }}"
             name: "{{ host }}"
             address: "{{ host_address }}"
+
+        - name: Add fence agent
+          ovirt_host_pm:
+            auth: "{{ ovirt_auth }}"
+            host: pm
+            address: 10.34.63.151
+            options:
+              myoption1: x
+              myoption2: y
+            username: admin
+            password: admin
+            type: ipmilan
 
         - name: Add data NFS storage domain
           ovirt_storage_domains:
