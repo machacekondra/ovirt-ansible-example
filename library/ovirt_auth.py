@@ -24,7 +24,7 @@ try:
 except ImportError:
     pass
 
-from ovirtansible.ovirt import *
+from ansible.module_utils.ovirt import *
 
 DOCUMENTATION = '''
 ---

@@ -25,7 +25,7 @@ try:
 except ImportError:
     HAS_SDK = False
 
-from ovirtansible.ovirt import *
+from ansible.module_utils.ovirt import *
 
 
 DOCUMENTATION = '''

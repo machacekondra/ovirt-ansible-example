@@ -52,6 +52,7 @@
             username: admin
             password: admin
             type: ipmilan
+            poll_interval: 10
 
         - name: Add data NFS storage domain
           ovirt_storage_domains:
