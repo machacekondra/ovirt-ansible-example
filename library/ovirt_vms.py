@@ -208,6 +208,7 @@ notes:
        I(REBOOTING), I(POWERING_UP), I(RESTORING_STATE), I(WAIT_FOR_LAUNCH). If VM is in I(PAUSED) or I(DOWN) state,
        we start the VM. Then we suspend the VM.
        When user specify I(absent) C(state), we forcibly stop the VM in any state and remove it."
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''

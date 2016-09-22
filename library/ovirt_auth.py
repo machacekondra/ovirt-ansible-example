@@ -24,7 +24,6 @@ try:
 except ImportError:
     pass
 
-from ansible.module_utils.ovirt import *
 
 DOCUMENTATION = '''
 ---
@@ -120,7 +119,7 @@ tasks:
         - name: Always revoke the SSO token
           ovirt_auth:
             state: absent
-            ovirt_auth: {{ ovirt_auth }}
+            ovirt_auth: "{{ ovirt_auth }}"
 '''
 
 RETURN = '''
@@ -229,5 +228,6 @@ def main():
 
 
 from ansible.module_utils.basic import *
+from ansible.module_utils.ovirt import *
 if __name__ == "__main__":
     main()
