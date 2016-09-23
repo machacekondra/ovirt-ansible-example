@@ -80,7 +80,7 @@ EXAMPLES = '''
 # Examples don't contain auth parameter for simplicity,
 # look at ovirt_auth module to see how to reuse authentication:
 
-# Create bond on eth0 and eth1 interface, and put myvlan network on top of it:
+# Create bond on eth0 and eth1 interface, and put 'myvlan' network on top of it:
 - ovirt_host_networks:
     name: myhost
     bond:

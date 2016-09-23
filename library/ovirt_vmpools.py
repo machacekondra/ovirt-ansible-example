@@ -31,190 +31,154 @@ from ansible.module_utils.ovirt import *
 DOCUMENTATION = '''
 ---
 module: ovirt_vmpools
-short_description: Module to manage vm pools in oVirt
+short_description: Module to manage VM pools in oVirt
 version_added: "2.2"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to manage vm pools in oVirt."
+    - "Module to manage VM pools in oVirt."
 options:
     name:
         description:
-            - "Name of the the vm pool to manage."
+            - "Name of the the VM pool to manage."
         required: true
     state:
         description:
-            - "Should the template be present/absent"
+            - "Should the VM pool be present/absent"
         choices: ['present', 'absent']
         default: present
     template:
         description:
-            - "Name of the template, which will be used to create vm pool."
+            - "Name of the template, which will be used to create VM pool."
     description:
         description:
-            - "Description of the vm pool."
-    cpu_profile:
-        description:
-            - "CPU profile to be set to template."
+            - "Description of the VM pool."
     cluster:
         description:
-            - "Name of the cluster, where template should be created/imported."
-    exclusive:
+            - "Name of the cluster, where VM pool should be created."
+    type:
         description:
-            - "When C(state) is I(exported) this parameter indicates if the existing templates with the
-               same name should be overwritten."
-    export_domain:
+            - "Type of the VM pool. Either manual or automatic."
+            - "C(manual) - The administrator is responsible for explicitly returning the virtual machine to the pool.
+               The virtual machine reverts to the original base image after the administrator returns it to the pool."
+            - "C(Automatic) - When the virtual machine is shut down, it automatically reverts to its base image and
+               is returned to the virtual machine pool."
+            - "Default value is set by engine."
+        choices: ['manual', 'automatic']
+    vm_per_user:
         description:
-            - "When C(state) is I(exported) this parameter specifies the name of the destination export storage domain."
-    storage_domain:
+            - "Maximum number of VMs a single user can attach to from this pool."
+            - "Default value is set by engine."
+    prestarted:
         description:
-            - "When C(state) is I(imported) this parameter specifies the name of the destination data storage domain."
-    clone_permissions:
+            - "Number of pre-started VMs defines the number of VMs in run state, that are waiting
+               to be attached to Users."
+            - "Default value is set by engine."
+    vm_count:
         description:
-            - "If I(True) then the permissions of the VM (only the direct ones, not the inherited ones)
-            will be copied to the created template."
-            - "This parameter is used only when C(state) I(present)."
-        default: False
+            - "Number of VMs in the pool."
+            - "Default value is set by engine."
+    delete_protected:
+        description:
+            - "If I(True) VM pool will be set as delete protected."
+            - "If I(False) VM pool won't be set as delete protected."
+            - "If no value is passed, default value is set by oVirt engine."
 '''
 
 EXAMPLES = '''
 # Examples don't contain auth parameter for simplicity,
 # look at ovirt_auth module to see how to reuse authentication:
 
-# Create template from vm
-- ovirt_templates:
-    cluster: Default
-    name: mytemplate
-    vm_name: rhel7
-    cpu_profile: Default
-    description: Test
+# Create VM pool from template
+- ovirt_vmpools:
+    cluster: mycluster
+    name: myvmpool
+    template: rhel7
+    vm_count: 2
+    prestarted: 2
+    vm_per_user: 1
 
-# Remove template
-- ovirt_templates:
+# Remove vmpool
+- ovirt_vmpools:
     state: absent
-    name: mytemplate
+    name: myvmpool
+    force: true
 '''
 
 
-class TemplatesModule(BaseModule):
+class VmPoolsModule(BaseModule):
 
     def build_entity(self):
-        return otypes.Template(
+        return otypes.VmPool(
             name=self._module.params['name'],
+            description=self._module.params['description'],
+            comment=self._module.params['comment'],
             cluster=otypes.Cluster(
                 name=self._module.params['cluster']
             ) if self._module.params['cluster'] else None,
-            vm=otypes.Vm(
-                name=self._module.params['vm_name']
-            ) if self._module.params['vm_name'] else None,
-            description=self._module.params['description'],
-            cpu_profile=otypes.CpuProfile(
-                id=search_by_name(
-                    self._connection.system_service().cpu_profiles_service(),
-                    self._module.params['cpu_profile'],
-                ).id
-            ) if self._module.params['cpu_profile'] else None,
+            template=otypes.Template(
+                name=self._module.params['template']
+            ) if self._module.params['template'] else None,
+            max_user_vms=self._module.params['vm_per_user'],
+            prestarted_vms=self._module.params['prestarted'],
+            size=self._module.params['vm_count'],
+            delete_protected=self._module.params['delete_protected'],
+            type=otypes.VmPoolType(
+                self._module.params['type']
+            ) if self._module.params['type'] else None,
         )
 
     def update_check(self, entity):
         return (
             equal(self._module.params.get('cluster'), get_link_name(self._connection, entity.cluster)) and
             equal(self._module.params.get('description'), entity.description) and
-            equal(self._module.params.get('cpu_profile'), get_link_name(self._connection, entity.cpu_profile))
+            equal(self._module.params.get('comment'), entity.comment) and
+            equal(self._module.params.get('vm_per_user'), entity.max_user_vms) and
+            equal(self._module.params.get('prestarted'), entity.prestarted_vms) and
+            equal(self._module.params.get('vm_count'), entity.size) and
+            equal(self._module.params.get('delete_protected'), entity.delete_protected)
         )
-
-    def _get_export_domain_service(self):
-        export_sds_service = self._connection.system_service().storage_domains_service()
-        export_sd = search_by_attributes(export_sds_service, name=self._module.params['export_domain'])
-        if export_sd is None:
-            raise ValueError("Export storage domain '%s' wasn't found." % self._module.params['export_domain'])
-
-        # Locate export storage domain templates service:
-        export_sd_service = export_sds_service.service(export_sd.id)
-        return export_sd_service
-
-    def post_export_action(self, entity):
-        self._service = self._get_export_domain_service().templates_service()
-
-    def post_import_action(self, entity):
-        self._service = self._connection.system_service().templates_service()
 
 
 def main():
     argument_spec = ovirt_full_argument_spec(
         state=dict(
-            choices=['present', 'absent', 'exported', 'imported'],
+            choices=['present', 'absent'],
             default='present',
         ),
         name=dict(default=None),
-        vm_name=dict(default=None),
-        description=dict(default=None),
+        template=dict(default=None),
         cluster=dict(default=None),
-        cpu_profile=dict(default=None),
-        disks=dict(default=[], type='list'),
-        clone_permissions=dict(type='bool'),
-        export_domain=dict(default=None),
-        storage_domain=dict(default=None),
-        exclusive=dict(type='bool'),
+        description=dict(default=None),
+        comment=dict(default=None),
+        vm_per_user=dict(default=None, type='int'),
+        prestarted=dict(default=None, type='int'),
+        vm_count=dict(default=None, type='int'),
+        type=dict(default=None, choices=['automatic', 'manual']),
+        delete_protected=dict(type='bool'),
+        force=dict(type='bool'),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
+    check_params(module)
 
     try:
         # Create connection to engine and clusters service:
         connection = create_connection(module.params.pop('auth'))
-        templates_service = connection.system_service().templates_service()
-        templates_module = TemplatesModule(
+        vm_pools_service = connection.system_service().vm_pools_service()
+        vm_pools_module = VmPoolsModule(
             connection=connection,
             module=module,
-            service=templates_service,
+            service=vm_pools_service,
         )
 
         state = module.params['state']
         if state == 'present':
-            ret = templates_module.create(
-                result_state=otypes.TemplateStatus.OK,
-                clone_permissions=module.params['clone_permissions'],
-            )
+            ret = vm_pools_module.create()
         elif state == 'absent':
-            ret = templates_module.remove()
-        elif state == 'exported':
-            template = templates_module.search_entity()
-            export_service = templates_module._get_export_domain_service()
-            export_template = search_by_attributes(export_service.templates_service(), id=template.id)
-
-            ret = templates_module.action(
-                entity=template,
-                action='export',
-                action_condition=lambda t: export_template is None,
-                wait_condition=lambda t: t is not None,
-                post_action=templates_module.post_export_action,
-                storage_domain=otypes.StorageDomain(id=export_service.get().id),
-                #exclusive=module.params['exclusive'],
-            )
-        elif state == 'imported':
-            template = templates_module.search_entity()
-            export_service = templates_module._get_export_domain_service()
-
-            templates_module._service = export_service.templates_service()
-            ret = templates_module.action(
-                entity=template,
-                action='import_',
-                action_condition=lambda t: template is None,
-                wait_condition=lambda t: t is not None and t.status == otypes.TemplateStatus.OK,
-                post_action=templates_module.post_import_action,
-                storage_domain=otypes.StorageDomain(
-                    name=module.params['storage_domain']
-                ) if module.params['storage_domain'] else None,
-                cluster=otypes.Cluster(
-                    name=module.params['cluster']
-                ) if module.params['cluster'] else None,
-                #exclusive=module.params['exclusive'],
-            )
+            ret = vm_pools_module.remove()
 
         module.exit_json(**ret)
     except sdk.Error as e:

@@ -24,6 +24,13 @@
             compatibility_version: 4.0
             quota_mode: disabled
 
+        - name: Create logical network
+          ovirt_networks:
+            auth: "{{ ovirt_auth }}"
+            name: mynetwork
+            datacenter_name: mydatacenter
+            vm_network: false
+
         - name: Create cluster
           ovirt_clusters:
             auth: "{{ ovirt_auth }}"
@@ -117,6 +124,15 @@
             export_domain: "{{ export_name }}"
             storage_domain: "{{ data_name }}"
             cluster: "{{ cluster }}"
+
+        - name: Create VM pool
+          ovirt_vmpools:
+            auth: "{{ ovirt_auth }}"
+            name: "{{ vmpool }}"
+            cluster: "{{ cluster }}"
+            template: "{{ template }}"
+            vm_count: 3
+            vm_per_user: 1
 
         - name: Create and run VM from template
           ovirt_vms:

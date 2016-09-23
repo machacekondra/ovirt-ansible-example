@@ -31,11 +31,11 @@ from ansible.module_utils.ovirt import *
 DOCUMENTATION = '''
 ---
 module: ovirt_hosts
-short_description: Module to create/delete/manage hosts in oVirt
+short_description: Module to manage hosts in oVirt
 version_added: "2.2"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to create/delete/manage hosts in oVirt"
+    - "Module to manage hosts in oVirt"
 options:
     name:
         description:
@@ -44,7 +44,7 @@ options:
     state:
         description:
             - "Should the host be present/absent/maintenance/upgraded"
-        choices: ['present', 'absent', 'maintenance', 'upgraded']
+        choices: ['present', 'absent', 'maintenance', 'upgraded', 'started', 'restarted', 'stopped']
         default: present
     comment:
         description:
@@ -102,6 +102,11 @@ EXAMPLES = '''
 # Maintenance
 - ovirt_hosts:
     state: maintenance
+    name: myhost
+
+# Restart host using power management:
+- ovirt_hosts:
+    state: restarted
     name: myhost
 
 # Upgrade host
@@ -165,7 +170,7 @@ class HostsModule(BaseModule):
 def main():
     argument_spec = ovirt_full_argument_spec(
         state=dict(
-            choices=['present', 'absent', 'maintenance', 'upgraded'],
+            choices=['present', 'absent', 'maintenance', 'upgraded', 'started', 'restarted', 'stopped'],
             default='present',
         ),
         name=dict(default=None),
@@ -216,6 +221,32 @@ def main():
                 action_condition=lambda h: h.update_available,
                 wait_condition=lambda h: h.status == otypes.HostStatus.UP,
             )
+        elif state == 'started':
+            ret = hosts_module.action(
+                action='fence',
+                action_condition=lambda h: h.status == otypes.HostStatus.DOWN,
+                wait_condition=lambda h: h.status in [otypes.HostStatus.UP, otypes.HostStatus.MAINTENANCE],
+                fence_type='start',
+            )
+        elif state == 'stopped':
+            hosts_module.action(
+                action='deactivate',
+                action_condition=lambda h: h.status not in [otypes.HostStatus.MAINTENANCE, otypes.HostStatus.DOWN],
+                wait_condition=lambda h: h.status == otypes.HostStatus.MAINTENANCE,
+            )
+            ret = hosts_module.action(
+                action='fence',
+                action_condition=lambda h: h.status != otypes.HostStatus.DOWN,
+                wait_condition=lambda h: h.status == otypes.HostStatus.DOWN,
+                fence_type='stop',
+            )
+        elif state == 'restarted':
+            ret = hosts_module.action(
+                action='fence',
+                wait_condition=lambda h: h.status == otypes.HostStatus.UP,
+                fence_type='restart',
+            )
+
 
         module.exit_json(**ret)
     except sdk.Error as e:

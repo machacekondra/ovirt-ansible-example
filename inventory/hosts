@@ -15,4 +15,5 @@ iscsi_name=data2
 export_name=export
 iso_name=iso
 template=rhel7
+vmpool=rhel7_pool
 vm=rhel7

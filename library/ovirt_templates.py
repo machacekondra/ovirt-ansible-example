@@ -88,6 +88,14 @@ EXAMPLES = '''
     cpu_profile: Default
     description: Test
 
+# Import template
+- ovirt_templates:
+  state: imported
+  name: mytemplate
+  export_domain: myexport
+  storage_domain: mystorage
+  cluster: mycluster
+
 # Remove template
 - ovirt_templates:
     state: absent

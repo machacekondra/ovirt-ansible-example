@@ -84,8 +84,8 @@ EXAMPLES = '''
 # Examples don't contain auth parameter for simplicity,
 # look at ovirt_auth module to see how to reuse authentication:
 
-- name: Add image external provider:
-  ovirt_external_providers:
+# Add image external provider:
+- ovirt_external_providers:
     name: image_provider
     type: os_image
     url: http://10.34.63.71:9292

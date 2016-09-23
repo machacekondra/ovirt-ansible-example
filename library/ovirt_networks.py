@@ -94,9 +94,9 @@ class NetworksModule(BaseModule):
             vlan=otypes.Vlan(
                 self._module.params['vlan_tag'],
             ) if self._module.params['vlan_tag'] else None,
-            usages=(
-                ['vm'] if self._module.params['vm_network'] else ['']
-            ) if self._module.params['vm_network'] is not None else None,
+            usages=[
+                otypes.NetworkUsage.VM if self._module.params['vm_network'] else None
+            ] if self._module.params['vm_network'] is not None else None,
         )
 
     def update_check(self, entity):
@@ -138,20 +138,16 @@ def main():
             service=networks_service,
         )
         state = module.params['state']
+        network = networks_module.search_entity(
+            search_params={
+                'name': module.params['name'],
+                'datacenter': module.params['datacenter_name'],
+            },
+        )
         if state == 'present':
-            ret = networks_module.create(
-                search_params={
-                    'name': module.params['name'],
-                    'datacenter': module.params['datacenter_name'],
-                }
-            )
+            ret = networks_module.create(entity=network)
         elif state == 'absent':
-            ret = networks_module.remove(
-                search_params={
-                    'name': module.params['name'],
-                    'datacenter': module.params['datacenter_name'],
-                }
-            )
+            ret = networks_module.remove(entity=network)
 
         module.exit_json(**ret)
     except sdk.Error as e:

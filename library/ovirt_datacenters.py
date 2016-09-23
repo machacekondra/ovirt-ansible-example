@@ -31,37 +31,37 @@ from ansible.module_utils.ovirt import *
 DOCUMENTATION = '''
 ---
 module: ovirt_datacenters
-short_description: Module to create/delete datacenters in oVirt
+short_description: Module to manage data centers in oVirt
 version_added: "2.2"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to create/delete datacenters in oVirt"
+    - "Module to manage data centers in oVirt"
 options:
     name:
         description:
-            - "Name of the the datacenter to manage."
+            - "Name of the the data center to manage."
         required: true
     state:
         description:
-            - "Should the datacenter be present or absent"
+            - "Should the data center be present or absent"
         choices: ['present', 'absent']
         default: present
     description:
         description:
-            - "Description of the datacenter."
+            - "Description of the data center."
     comment:
         description:
-            - "Comment of the datacenter."
+            - "Comment of the data center."
     local:
         description:
-            - "I(True) if the datacenter should be local, I(False) if should be shared."
+            - "I(True) if the data center should be local, I(False) if should be shared."
             - "Default value is set by engine."
     compatibility_version:
         description:
-            - "Compatibility version of the datacenter."
+            - "Compatibility version of the data center."
     quota_mode:
         description:
-            - "Quota mode of the datacenter. One of I(disabled), I(audit) or I(enabled)"
+            - "Quota mode of the data center. One of I(disabled), I(audit) or I(enabled)"
         choices: ['disabled', 'audit', 'enabled']
 '''
 

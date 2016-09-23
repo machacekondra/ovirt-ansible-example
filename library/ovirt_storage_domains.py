@@ -109,8 +109,8 @@ EXAMPLES = '''
 # Examples don't contain auth parameter for simplicity,
 # look at ovirt_auth module to see how to reuse authentication:
 
-- name: Add data NFS storage domain
-  ovirt_storage_domains:
+# Add data NFS storage domain
+- ovirt_storage_domains:
     name: data_nfs
     host: myhost
     data_center: mydatacenter
@@ -118,8 +118,8 @@ EXAMPLES = '''
       address: 10.34.63.199
       path: /path/data
 
-- name: Add data iSCSI storage domain
-  ovirt_storage_domains:
+# Add data iSCSI storage domain:
+- ovirt_storage_domains:
     name: data_iscsi
     host: myhost
     data_center: mydatacenter
@@ -128,8 +128,8 @@ EXAMPLES = '''
       lun_id: 1IET_000d0002
       address: 10.34.63.204
 
-- name: Import export NFS storage domain
-  ovirt_storage_domains:
+# Import export NFS storage domain:
+- ovirt_storage_domains:
     domain_function: export
     host: myhost
     data_center: mydatacenter
@@ -137,8 +137,8 @@ EXAMPLES = '''
       address: 10.34.63.199
       path: /path/export
 
-- name: Create ISO NFS storage domain
-  ovirt_storage_domains:
+# Create ISO NFS storage domain
+- ovirt_storage_domains:
     name: myiso
     domain_function: iso
     host: myhost

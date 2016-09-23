@@ -31,16 +31,20 @@ from ansible.module_utils.ovirt import *
 DOCUMENTATION = '''
 ---
 module: ovirt_clusters
-short_description: Module to create/delete clusters in oVirt
+short_description: Module to manage clusters in oVirt
 version_added: "2.2"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to create/delete clusters in oVirt"
+    - "Module to manage clusters in oVirt"
 options:
+    id:
+        description:
+            - "ID of the the cluster to manage."
+            - "Name or ID is required."
     name:
         description:
             - "Name of the the cluster to manage."
-        required: true
+            - "Name or ID is required."
     state:
         description:
             - "Should the cluster be present or absent"
@@ -48,7 +52,7 @@ options:
         default: present
     datacenter_name:
         description:
-            - "Datacenter name where cluster reside."
+            - "Data center name where cluster reside."
     description:
         description:
             - "Description of the cluster."
@@ -57,7 +61,7 @@ options:
             - "Comment of the cluster."
     network:
         description:
-            - "Management network of cluster."
+            - "Network of cluster."
     cpu_arch:
         description:
             - "CPU architecture of cluster."
@@ -78,7 +82,6 @@ EXAMPLES = '''
 
 # Create cluster
 - ovirt_clusters:
-    auth: "{{ ovirt_auth }}"
     datacenter_name: mydatacenter
     name: mycluster
     cpu_type: Intel SandyBridge Family
@@ -165,9 +168,8 @@ def main():
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
+    check_params(module)
 
     try:
         # Create connection to engine and clusters service:

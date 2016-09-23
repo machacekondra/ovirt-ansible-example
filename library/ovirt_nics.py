@@ -79,14 +79,12 @@ EXAMPLES = '''
 
 # Plug NIC to VM
 - ovirt_nics:
-    auth: "{{ ovirt_auth }}"
     state: plugged
     vm_name: myvm
     name: mynic
 
 # Unplug NIC from VM
 - ovirt_nics:
-    auth: "{{ ovirt_auth }}"
     state: unplugged
     vm_name: myvm
     name: mynic

@@ -196,6 +196,8 @@ def main():
                 }
             )
             ret = host_pm_module.create(entity=agent)
+
+            # Enable Power Management, if it's not:
             host_module.create(entity=host)
         elif state == 'absent':
             agent = host_pm_module.search_entity(
@@ -205,31 +207,6 @@ def main():
                 }
             )
             ret = host_pm_module.remove(entity=agent)
-        elif state == 'started':
-            ret = host_module.action(
-                action='fence',
-                action_condition=lambda h: h.status == otypes.HostStatus.DOWN,
-                wait_condition=lambda h: h.status in [otypes.HostStatus.UP, otypes.HostStatus.MAINTENANCE],
-                fence_type='start',
-            )
-        elif state == 'stopped':
-            host_module.action(
-                action='deactivate',
-                action_condition=lambda h: h.status not in [otypes.HostStatus.MAINTENANCE, otypes.HostStatus.DOWN],
-                wait_condition=lambda h: h.status == otypes.HostStatus.MAINTENANCE,
-            )
-            ret = host_module.action(
-                action='fence',
-                action_condition=lambda h: h.status != otypes.HostStatus.DOWN,
-                wait_condition=lambda h: h.status == otypes.HostStatus.DOWN,
-                fence_type='stop',
-            )
-        elif state == 'restarted':
-            ret = host_module.action(
-                action='fence',
-                wait_condition=lambda h: h.status == otypes.HostStatus.UP,
-                fence_type='restart',
-            )
 
         module.exit_json(**ret)
     except sdk.Error as e:
