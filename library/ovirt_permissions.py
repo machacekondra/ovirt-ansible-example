@@ -1,46 +1,57 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
 #
-
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+#
 
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
 except ImportError:
-    HAS_SDK = False
+    pass
 
-from ansible.module_utils.ovirt import *
+import traceback
+
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_sdk,
+    create_connection,
+    equal,
+    follow_link,
+    get_link_name,
+    ovirt_full_argument_spec,
+    search_by_attributes,
+    search_by_name,
+)
 
 
 DOCUMENTATION = '''
 ---
 module: ovirt_permissions
 short_description: "Module to manage permissions of users/groups in oVirt"
-version_added: "2.2"
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
     - "Module to manage permissions of users/groups in oVirt"
 options:
     role:
         description:
-            - "Name of the the role to be assigned to user/group."
-        required: true
+            - "Name of the the role to be assigned to user/group on specific object."
         default: UserRole
     state:
         description:
@@ -50,41 +61,40 @@ options:
     object_id:
         description:
             - "ID of the object where the permissions should be managed."
-        required: true
     object_name:
         description:
             - "Name of the object where the permissions should be managed."
-        required: true
     object_type:
         description:
             - "The object where the permissions should be managed."
-        required: true
         default: 'virtual_machine'
         choices: [
             'data_center',
             'cluster',
             'host',
-            'storage',
+            'storage_domain',
             'network',
             'disk',
-            'virtual_machine',
+            'vm',
             'vm_pool',
             'template',
         ]
     user_name:
         description:
-            - "Name of the the user to manage. In most LDAPs it's uid of the user, but in Active Directory you must specify UPN of the user."
+            - "Username of the the user to manage. In most LDAPs it's I(uid) of the user, but in Active Directory you must specify I(UPN) of the user."
     group_name:
         description:
             - "Name of the the group to manage."
     authz_name:
         description:
-            - "Authorization provider of the user. Previously known as domain."
+            - "Authorization provider of the user/group. In previous versions of oVirt known as domain."
         required: true
+        aliases: ['domain']
     namespace:
         description:
             - "Namespace of the authorization provider, where user/group resides."
         required: false
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -95,7 +105,7 @@ EXAMPLES = '''
 - ovirt_permissions:
     user_name: user1
     authz_name: example.com-authz
-    object_type: virtual_machine
+    object_type: vm
     object_name: myvm
     role: UserVmManager
 
@@ -109,80 +119,47 @@ EXAMPLES = '''
     role: ClusterAdmin
 '''
 
-
-def __get_objects_service(connection, module):
-    system_service = connection.system_service()
-    return {
-        'data_center': system_service.data_centers_service(),
-        'cluster': system_service.clusters_service(),
-        'host': system_service.hosts_service(),
-        'storage': system_service.storage_domains_service(),
-        'network': system_service.networks_service(),
-        'disk': system_service.disks_service(),
-        'virtual_machine': system_service.vms_service(),
-        'vm_pool': system_service.vm_pools_service(),
-        'template': system_service.templates_service(),
-    }.get(module.params['object_type'], None)
+RETURN = '''
+id:
+    description: ID of the permission which is managed
+    returned: On success if permission is found.
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+permission:
+    description: "Dictionary of all the permission attributes. Permission attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/permission."
+    returned: On success if permission is found.
+'''
 
 
-def __get_object_service(connection, module):
-    objects_service = __get_objects_service(connection, module)
+def _objects_service(connection, object_type):
+    return getattr(
+        connection.system_service(),
+        '%ss_service' % object_type,
+        None,
+    )()
+
+
+def _object_service(connection, module):
+    object_type = module.params['object_type']
+    objects_service = _objects_service(connection, object_type)
+
     object_id = module.params['object_id']
     if object_id is None:
-        object_id = getattr(search_by_name(objects_service, module.params['object_name']), 'id', None)
-
-    object_type = module.params['object_type']
-    if object_type == 'data_center':
-        return objects_service.data_center_service(object_id)
-    elif object_type == 'cluster':
-        return objects_service.cluster_service(object_id)
-    elif object_type == 'host':
-        return objects_service.host_service(object_id)
-    elif object_type == 'storage':
-        return objects_service.storage_domain_service(object_id)
-    elif object_type == 'network':
-        return objects_service.network_service(object_id)
-    elif object_type == 'disk':
-        return objects_service.disk_service(object_id)
-    elif object_type == 'virtual_machine':
-        return objects_service.vm_service(object_id)
-    elif object_type == 'vm_pool':
-        return objects_service.vm_pool_service(object_id)
-    elif object_type == 'template':
-        return objects_service.template_service(object_id)
-    return None
-
-
-def __get_user(module, users_service):
-    users = users_service.list(
-        search="usrname={name}@{authz_name}".format(
-            name=module.params['user_name'],
-            authz_name=module.params['authz_name'],
-        )
-    ) or [None]
-
-    return users[0]
-
-
-def __get_group(module, groups_service):
-    groups = groups_service.list(
-        search="name={name}".format(
-            name=module.params['group_name'],
-        )
-    )
-
-    # If found more groups, filter them by namespace and authz name:
-    if len(groups) > 1:
-        groups = [
-            g for g in groups if (
-                equal(module.params['namespace'], g.namespace) and
-                equal(module.params['authz_name'], g.domain.name)
+        sdk_object = search_by_name(objects_service, module.params['object_name'])
+        if sdk_object is None:
+            raise Exception(
+                "'%s' object '%s' was not found." % (
+                    module.params['object_type'],
+                    module.params['object_name']
+                )
             )
-        ] or [None]
-    return groups[0]
+        object_id = sdk_object.id
+
+    return objects_service.service(object_id)
 
 
-def __get_permission(module, permissions_service, connection):
+def _permission(module, permissions_service, connection):
     for permission in permissions_service.list():
         user = follow_link(connection, permission.user)
         if (
@@ -190,18 +167,45 @@ def __get_permission(module, permissions_service, connection):
             equal(module.params['group_name'], get_link_name(connection, permission.group)) and
             equal(module.params['role'], get_link_name(connection, permission.role))
         ):
-            # The permission was found:
             return permission
-    return None
 
 
 class PermissionsModule(BaseModule):
 
+    def _user(self):
+        user = search_by_attributes(
+            self._connection.system_service().users_service(),
+            usrname="{name}@{authz_name}".format(
+                name=self._module.params['user_name'],
+                authz_name=self._module.params['authz_name'],
+            ),
+        )
+        if user is None:
+            raise Exception("User '%s' was not found." % self._module.params['user_name'])
+        return user
+
+    def _group(self):
+        groups = self._connection.system_service().groups_service().list(
+            search="name={name}".format(
+                name=self._module.params['group_name'],
+            )
+        )
+
+        # If found more groups, filter them by namespace and authz name:
+        # (filtering here, as oVirt backend doesn't support it)
+        if len(groups) > 1:
+            groups = [
+                g for g in groups if (
+                    equal(self._module.params['namespace'], g.namespace) and
+                    equal(self._module.params['authz_name'], g.domain.name)
+                )
+            ]
+        if not groups:
+            raise Exception("Group '%s' was not found." % self._module.params['group_name'])
+        return groups[0]
+
     def build_entity(self):
-        if self._module.params['group_name'] is not None:
-            entity = __get_group(self._module, self._connection.system_service().groups_service())
-        else:
-            entity = __get_user(self._module, self._connection.system_service().users_service())
+        entity = self._group() if self._module.params['group_name'] else self._user()
 
         return otypes.Permission(
             user=otypes.User(
@@ -229,15 +233,15 @@ def main():
                 'data_center',
                 'cluster',
                 'host',
-                'storage',
+                'storage_domain',
                 'network',
                 'disk',
-                'virtual_machine',
+                'vm',
                 'vm_pool',
                 'template',
             ]
         ),
-        authz_name=dict(required=True),
+        authz_name=dict(required=True, aliases=['domain']),
         object_id=dict(default=None),
         object_name=dict(default=None),
         user_name=dict(rdefault=None),
@@ -248,9 +252,7 @@ def main():
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
 
     if module.params['object_name'] is None and module.params['object_id'] is None:
         module.fail_json(msg='"object_name" or "object_id" is required')
@@ -259,17 +261,15 @@ def main():
         module.fail_json(msg='"user_name" or "group_name" is required')
 
     try:
-        # Create connection to engine and clusters service:
         connection = create_connection(module.params.pop('auth'))
-        permissions_service = __get_object_service(connection, module).permissions_service()
-
+        permissions_service = _object_service(connection, module).permissions_service()
         permissions_module = PermissionsModule(
             connection=connection,
             module=module,
             service=permissions_service,
         )
 
-        permission = __get_permission(module, permissions_service, connection)
+        permission = _permission(module, permissions_service, connection)
         state = module.params['state']
         if state == 'present':
             ret = permissions_module.create(entity=permission)
@@ -277,13 +277,11 @@ def main():
             ret = permissions_module.remove(entity=permission)
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
-        module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
-from ansible.module_utils.basic import *
+
 if __name__ == "__main__":
     main()

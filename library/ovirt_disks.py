@@ -19,13 +19,26 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import traceback
+
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
 except ImportError:
     pass
 
-from ansible.module_utils.ovirt import *
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_sdk,
+    check_params,
+    convert_to_bytes,
+    create_connection,
+    equal,
+    follow_link,
+    ovirt_full_argument_spec,
+    search_by_name,
+    wait,
+)
 
 
 DOCUMENTATION = '''
@@ -57,7 +70,9 @@ options:
         default: 'present'
     size:
         description:
-            - "Size of the disk. Size should be specified using IEC standard units. For example 10GiB, 1024MiB, etc."
+            - "Size of the disk. Size should be specified using IEC standard units.
+              For example 10GiB, 1024MiB, etc."
+            - "Size can be only increased, not decreased."
     interface:
         description:
             - "Driver of the storage interface."
@@ -65,11 +80,20 @@ options:
         default: 'virtio'
     format:
         description:
-            - "Format of the disk. Either copy-on-write or raw."
+            - Specify format of the disk.
+            - If (cow) format is used, disk will by created as sparse, so space will be allocated for the volume as needed, also known as I(thin provision).
+            - If (raw) format is used, disk storage will be allocated right away, also known as I(preallocated).
+            - Note that this option isn't idempotent as it's not currently possible to change format of the disk via API.
         choices: ['raw', 'cow']
     storage_domain:
         description:
             - "Storage domain name where disk should be created. By default storage is chosen by oVirt engine."
+    storage_domains:
+        description:
+            - "Storage domain names where disk should be copied."
+            - "Please note that this parameter isn't idempotent, so always you specify this attribute
+               the disk will be copied to the specified storage domains."
+        version_added: "2.3"
     profile:
         description:
             - "Disk profile name to be attached to disk. By default profile is chosen by oVirt engine."
@@ -144,7 +168,6 @@ disk_attachment:
 '''
 
 
-
 def _search_by_lun(disks_service, lun_id):
     """
     Find disk by LUN ID.
@@ -168,6 +191,7 @@ class DisksModule(BaseModule):
             format=otypes.DiskFormat(
                 self._module.params.get('format')
             ) if self._module.params.get('format') else None,
+            sparse=self._module.params.get('format') != 'raw',
             provisioned_size=convert_to_bytes(
                 self._module.params.get('size')
             ),
@@ -194,7 +218,40 @@ class DisksModule(BaseModule):
             ) if logical_unit else None,
         )
 
-    def update_check(self, entity):
+    def update_storage_domains(self, disk_id):
+        changed = False
+        disk_service = self._service.service(disk_id)
+        disk = disk_service.get()
+        sds_service = self._connection.system_service().storage_domains_service()
+
+        # Initiate move:
+        if self._module.params['storage_domain']:
+            new_disk_storage = search_by_name(sds_service, self._module.params['storage_domain'])
+            changed = self.action(
+                action='move',
+                entity=disk,
+                action_condition=lambda d: new_disk_storage.id != d.storage_domains[0].id,
+                wait_condition=lambda d: d.status == otypes.DiskStatus.OK,
+                storage_domain=otypes.StorageDomain(
+                    id=new_disk_storage.id,
+                ),
+            )['changed']
+
+        if self._module.params['storage_domains']:
+            for sd in self._module.params['storage_domains']:
+                new_disk_storage = search_by_name(sds_service, sd)
+                changed = changed or self.action(
+                    action='copy',
+                    entity=disk,
+                    wait_condition=lambda disk: disk.status == otypes.DiskStatus.OK,
+                    storage_domain=otypes.StorageDomain(
+                        id=new_disk_storage.id,
+                    ),
+                )['changed']
+
+        return changed
+
+    def _update_check(self, entity):
         return (
             equal(self._module.params.get('description'), entity.description) and
             equal(convert_to_bytes(self._module.params.get('size')), entity.provisioned_size) and
@@ -217,6 +274,7 @@ class DiskAttachmentsModule(DisksModule):
 
     def update_check(self, entity):
         return (
+            super(DiskAttachmentsModule, self)._update_check(follow_link(self._connection, entity.disk)) and
             equal(self._module.params.get('interface'), str(entity.interface)) and
             equal(self._module.params.get('bootable'), entity.bootable)
         )
@@ -234,8 +292,8 @@ def main():
         vm_id=dict(default=None),
         size=dict(default=None),
         interface=dict(default=None,),
-        allocation_policy=dict(default=None),
         storage_domain=dict(default=None),
+        storage_domains=dict(default=None, type='list'),
         profile=dict(default=None),
         format=dict(default=None, choices=['raw', 'cow']),
         bootable=dict(default=None, type='bool'),
@@ -271,6 +329,7 @@ def main():
                 entity=disk,
                 result_state=otypes.DiskStatus.OK if lun is None else None,
             )
+            ret['changed'] = ret['changed'] or disks_module.update_storage_domains(ret['id'])
             # We need to pass ID to the module, so in case we want detach/attach disk
             # we have this ID specified to attach/detach method:
             module.params['id'] = ret['id'] if disk is None else disk.id
@@ -278,7 +337,7 @@ def main():
             ret = disks_module.remove()
 
         # If VM was passed attach/detach disks to/from the VM:
-        if 'vm_id' in module.params or 'vm_name' in module.params and state != 'absent':
+        if module.params['vm_id'] or module.params['vm_name'] and state != 'absent':
             vms_service = connection.system_service().vms_service()
 
             # If `vm_id` isn't specified, find VM by name:
@@ -301,16 +360,22 @@ def main():
 
             if state == 'present' or state == 'attached':
                 ret = disk_attachments_module.create()
+                if lun is None:
+                    wait(
+                        service=disk_attachments_service.service(ret['id']),
+                        condition=lambda d:follow_link(connection, d.disk).status == otypes.DiskStatus.OK,
+                        wait=module.params['wait'],
+                        timeout=module.params['timeout'],
+                    )
             elif state == 'detached':
                 ret = disk_attachments_module.remove()
 
         module.exit_json(**ret)
     except Exception as e:
-        module.fail_json(msg=str(e))
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
         connection.close(logout=False)
 
 
-from ansible.module_utils.basic import *
 if __name__ == "__main__":
     main()

@@ -1,29 +1,31 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
 #
-
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+#
 
 try:
     import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
+
+    from ovirtsdk4.types import HostStatus as hoststate
 except ImportError:
-    HAS_SDK = False
+    pass
 
 from ansible.module_utils.ovirt import *
 
@@ -32,7 +34,7 @@ DOCUMENTATION = '''
 ---
 module: ovirt_hosts
 short_description: Module to manage hosts in oVirt
-version_added: "2.2"
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
     - "Module to manage hosts in oVirt"
@@ -43,7 +45,7 @@ options:
         required: true
     state:
         description:
-            - "Should the host be present/absent/maintenance/upgraded"
+            - "State which should a host to be in after successful completion."
         choices: ['present', 'absent', 'maintenance', 'upgraded', 'started', 'restarted', 'stopped']
         default: present
     comment:
@@ -54,7 +56,7 @@ options:
             - "Name of the cluster, where host should be created."
     address:
         description:
-            - "Host address. Can be IP address or FQDN."
+            - "Host address. It can be either FQDN (preferred) or IP address."
     password:
         description:
             - "Password of the root. It's required in case C(public_key) is set to I(False)."
@@ -79,6 +81,7 @@ options:
         description:
             - "If True host will be forcibly moved to desired state."
         default: False
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -121,6 +124,18 @@ EXAMPLES = '''
     force: True
 '''
 
+RETURN = '''
+id:
+    description: ID of the host which is managed
+    returned: On success if host is found.
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+host:
+    description: "Dictionary of all the host attributes. Host attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/host."
+    returned: On success if host is found.
+'''
+
 
 class HostsModule(BaseModule):
 
@@ -156,15 +171,53 @@ class HostsModule(BaseModule):
         self.action(
             entity=entity,
             action='deactivate',
-            action_condition=lambda h: h.status != otypes.HostStatus.MAINTENANCE,
-            wait_condition=lambda h: h.status == otypes.HostStatus.MAINTENANCE,
+            action_condition=lambda h: h.status != hoststate.MAINTENANCE,
+            wait_condition=lambda h: h.status == hoststate.MAINTENANCE,
         )
 
     def post_update(self, entity):
-        if entity.status != otypes.HostStatus.UP:
+        if entity.status != hoststate.UP:
             if not self._module.check_mode:
                 self._service.host_service(entity.id).activate()
             self.changed = True
+
+
+def failed_state(host):
+    return host.status in [
+        hoststate.ERROR,
+        hoststate.INSTALL_FAILED,
+        hoststate.NON_RESPONSIVE,
+        hoststate.NON_OPERATIONAL,
+    ]
+
+
+def control_state(host_module):
+    host = host_module.search_entity()
+    if host is None:
+        return
+
+    state = host_module._module.params['state']
+    host_service = host_module._service.service(host.id)
+    if failed_state(host):
+        raise Exception("Not possible to manage host '%s'." % host.name)
+    elif host.status in [
+        hoststate.REBOOT,
+        hoststate.CONNECTING,
+        hoststate.INITIALIZING,
+        hoststate.INSTALLING,
+        hoststate.INSTALLING_OS,
+    ]:
+        wait(
+            service=host_service,
+            condition=lambda host: host.status == hoststate.UP,
+            fail_condition=failed_state,
+        )
+    elif host.status == hoststate.PREPARING_FOR_MAINTENANCE:
+        wait(
+            service=host_service,
+            condition=lambda host: host.status == hoststate.MAINTENANCE,
+            fail_condition=failed_state,
+        )
 
 
 def main():
@@ -173,7 +226,7 @@ def main():
             choices=['present', 'absent', 'maintenance', 'upgraded', 'started', 'restarted', 'stopped'],
             default='present',
         ),
-        name=dict(default=None),
+        name=dict(required=True),
         comment=dict(default=None),
         cluster=dict(default=None),
         address=dict(default=None),
@@ -189,12 +242,9 @@ def main():
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
 
     try:
-        # Create connection to engine and clusters service:
         connection = create_connection(module.params.pop('auth'))
         hosts_service = connection.system_service().hosts_service()
         hosts_module = HostsModule(
@@ -204,57 +254,68 @@ def main():
         )
 
         state = module.params['state']
+        control_state(hosts_module)
         if state == 'present':
-            # FIXME: Handle states properly, ( ie. what if host is in maintanence)
-            ret = hosts_module.create(result_state=otypes.HostStatus.UP)
+            ret = hosts_module.create()
+            hosts_module.action(
+                action='activate',
+                action_condition=lambda h: h.status == hoststate.MAINTENANCE,
+                wait_condition=lambda h: h.status == hoststate.UP,
+                fail_condition=failed_state,
+            )
         elif state == 'absent':
             ret = hosts_module.remove()
         elif state == 'maintenance':
             ret = hosts_module.action(
                 action='deactivate',
-                action_condition=lambda h: h.status != otypes.HostStatus.MAINTENANCE,
-                wait_condition=lambda h: h.status == otypes.HostStatus.MAINTENANCE,
+                action_condition=lambda h: h.status != hoststate.MAINTENANCE,
+                wait_condition=lambda h: h.status == hoststate.MAINTENANCE,
+                fail_condition=failed_state,
             )
         elif state == 'upgraded':
             ret = hosts_module.action(
                 action='upgrade',
                 action_condition=lambda h: h.update_available,
-                wait_condition=lambda h: h.status == otypes.HostStatus.UP,
+                wait_condition=lambda h: h.status == hoststate.UP,
+                fail_condition=failed_state,
             )
         elif state == 'started':
             ret = hosts_module.action(
                 action='fence',
-                action_condition=lambda h: h.status == otypes.HostStatus.DOWN,
-                wait_condition=lambda h: h.status in [otypes.HostStatus.UP, otypes.HostStatus.MAINTENANCE],
+                action_condition=lambda h: h.status == hoststate.DOWN,
+                wait_condition=lambda h: h.status in [hoststate.UP, hoststate.MAINTENANCE],
+                fail_condition=failed_state,
                 fence_type='start',
             )
         elif state == 'stopped':
             hosts_module.action(
                 action='deactivate',
-                action_condition=lambda h: h.status not in [otypes.HostStatus.MAINTENANCE, otypes.HostStatus.DOWN],
-                wait_condition=lambda h: h.status == otypes.HostStatus.MAINTENANCE,
+                action_condition=lambda h: h.status not in [hoststate.MAINTENANCE, hoststate.DOWN],
+                wait_condition=lambda h: h.status in [hoststate.MAINTENANCE, hoststate.DOWN],
+                fail_condition=failed_state,
             )
             ret = hosts_module.action(
                 action='fence',
-                action_condition=lambda h: h.status != otypes.HostStatus.DOWN,
-                wait_condition=lambda h: h.status == otypes.HostStatus.DOWN,
+                action_condition=lambda h: h.status != hoststate.DOWN,
+                wait_condition=lambda h: h.status == hoststate.DOWN,
+                fail_condition=failed_state,
                 fence_type='stop',
             )
         elif state == 'restarted':
             ret = hosts_module.action(
                 action='fence',
-                wait_condition=lambda h: h.status == otypes.HostStatus.UP,
+                wait_condition=lambda h: h.status == hoststate.UP,
+                fail_condition=failed_state,
                 fence_type='restart',
             )
 
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
+    except Exception as e:
         module.fail_json(msg=str(e))
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
+
 
 from ansible.module_utils.basic import *
 if __name__ == "__main__":

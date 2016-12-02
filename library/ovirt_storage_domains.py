@@ -1,49 +1,60 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
 #
-
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+#
 
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
-except ImportError:
-    HAS_SDK = False
 
-from ansible.module_utils.ovirt import *
+    from ovirtsdk4.types import StorageDomainStatus as sdstate
+except ImportError:
+    pass
+
+import traceback
+
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_sdk,
+    create_connection,
+    ovirt_full_argument_spec,
+    search_by_name,
+    wait,
+)
 
 
 DOCUMENTATION = '''
 ---
 module: ovirt_storage_domains
-short_description: Module to manage storage_domains in oVirt
-version_added: "2.2"
+short_description: Module to manage storage domains in oVirt
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to manage storage_domains in oVirt"
+    - "Module to manage storage domains in oVirt"
 options:
     name:
         description:
             - "Name of the the storage domain to manage."
     state:
         description:
-            - "Should the storage domain be present/absent/maintenance"
-        choices: ['present', 'absent', 'maintenance']
+            - "Should the storage domain be present/absent/maintenance/unattached"
+        choices: ['present', 'absent', 'maintenance', 'unattached']
         default: present
     description:
         description:
@@ -53,7 +64,7 @@ options:
             - "Comment of the storage domain."
     data_center:
         description:
-            - "Datacenter name where storage domain should be attached."
+            - "Data center name where storage domain should be attached."
     domain_function:
         description:
             - "Function of the storage domain."
@@ -103,6 +114,7 @@ options:
         description:
             - "If I(True) storage domain will be removed after removing it from oVirt."
             - "This parameter is relevant only when C(state) is I(absent)."
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -153,6 +165,19 @@ EXAMPLES = '''
     name: mystorage_domain
     format: true
 '''
+
+RETURN = '''
+id:
+    description: ID of the storage domain which is managed
+    returned: On success if storage domain is found.
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+storage domain:
+    description: "Dictionary of all the storage domain attributes. Storage domain attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/storage_domain."
+    returned: On success if storage domain is found.
+'''
+
 
 class StorageDomainModule(BaseModule):
 
@@ -218,10 +243,8 @@ class StorageDomainModule(BaseModule):
         dcs_service = self._connection.system_service().data_centers_service()
         dc = search_by_name(dcs_service, self._module.params['data_center'])
         if dc is None:
-            return None
+            return
 
-        # Locate the service that manages the data center where we want to
-        # detach the storage domain:
         dc_service = dcs_service.data_center_service(dc.id)
         return dc_service.storage_domains_service()
 
@@ -233,15 +256,14 @@ class StorageDomainModule(BaseModule):
         attached_sd_service = attached_sds_service.storage_domain_service(storage_domain.id)
         attached_sd = attached_sd_service.get()
 
-        if attached_sd and attached_sd.status != otypes.StorageDomainStatus.MAINTENANCE:
+        if attached_sd and attached_sd.status != sdstate.MAINTENANCE:
             if not self._module.check_mode:
                 attached_sd_service.deactivate()
             self.changed = True
 
-            # Wait until storage domain is in maintenance:
             wait(
                 service=attached_sd_service,
-                condition=lambda sd: sd.status == otypes.StorageDomainStatus.MAINTENANCE,
+                condition=lambda sd: sd.status == sdstate.MAINTENANCE,
                 wait=self._module.params['wait'],
                 timeout=self._module.params['timeout'],
             )
@@ -254,7 +276,7 @@ class StorageDomainModule(BaseModule):
         attached_sd_service = attached_sds_service.storage_domain_service(storage_domain.id)
         attached_sd = attached_sd_service.get()
 
-        if attached_sd and attached_sd.status == otypes.StorageDomainStatus.MAINTENANCE:
+        if attached_sd and attached_sd.status == sdstate.MAINTENANCE:
             if not self._module.check_mode:
                 # Detach the storage domain:
                 attached_sd_service.remove()
@@ -290,7 +312,7 @@ class StorageDomainModule(BaseModule):
             # Wait until storage domain is in maintenance:
             wait(
                 service=attached_sd_service,
-                condition=lambda sd: sd.status == otypes.StorageDomainStatus.ACTIVE,
+                condition=lambda sd: sd.status == sdstate.ACTIVE,
                 wait=self._module.params['wait'],
                 timeout=self._module.params['timeout'],
             )
@@ -299,16 +321,56 @@ class StorageDomainModule(BaseModule):
         self._service = self._attached_sds_service(storage_domain)
         self._maintenance(self._service, storage_domain)
 
+
+def failed_state(sd):
+    return sd.status in [sdstate.UNKNOWN, sdstate.INACTIVE]
+
+
+def control_state(sd_module):
+    sd = sd_module.search_entity()
+    if sd is None:
+        return
+
+    sd_service = sd_module._service.service(sd.id)
+    if sd.status == sdstate.LOCKED:
+        wait(
+            service=sd_service,
+            condition=lambda sd: sd.status != sdstate.LOCKED,
+            fail_condition=failed_state,
+        )
+
+    if failed_state(sd):
+        raise Exception("Not possible to manage storage domain '%s'." % sd.name)
+    elif sd.status == sdstate.ACTIVATING:
+        wait(
+            service=sd_service,
+            condition=lambda sd: sd.status == sdstate.ACTIVE,
+            fail_condition=failed_state,
+        )
+    elif sd.status == sdstate.DETACHING:
+        wait(
+            service=sd_service,
+            condition=lambda sd: sd.status == sdstate.UNATTACHED,
+            fail_condition=failed_state,
+        )
+    elif sd.status == sdstate.PREPARING_FOR_MAINTENANCE:
+        wait(
+            service=sd_service,
+            condition=lambda sd: sd.status == sdstate.MAINTENANCE,
+            fail_condition=failed_state,
+        )
+
+
 def main():
     argument_spec = ovirt_full_argument_spec(
         state=dict(
-            choices=['present', 'absent', 'maintenance'],
+            choices=['present', 'absent', 'maintenance', 'unattached'],
             default='present',
         ),
-        name=dict(default=None),
+        name=dict(required=True),
         description=dict(default=None),
         comment=dict(default=None),
-        data_center=dict(requited=True),
+        data_center=dict(required=True),
         domain_function=dict(choices=['data', 'iso', 'export'], default='data', aliases=['type']),
         host=dict(default=None),
         nfs=dict(default=None, type='dict'),
@@ -323,12 +385,9 @@ def main():
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
 
     try:
-        # Create connection to engine and storage domain service:
         connection = create_connection(module.params.pop('auth'))
         storage_domains_service = connection.system_service().storage_domains_service()
         storage_domains_module = StorageDomainModule(
@@ -338,6 +397,7 @@ def main():
         )
 
         state = module.params['state']
+        control_state(storage_domains_module)
         if state == 'absent':
             ret = storage_domains_module.remove(
                 destroy=module.params['destroy'],
@@ -349,27 +409,32 @@ def main():
             storage_domains_module.post_create_check(sd_id)
             ret = storage_domains_module.action(
                 action='activate',
-                action_condition=lambda s: s.status == otypes.StorageDomainStatus.MAINTENANCE,
-                wait_condition=lambda s: s.status == otypes.StorageDomainStatus.ACTIVE,
+                action_condition=lambda s: s.status == sdstate.MAINTENANCE,
+                wait_condition=lambda s: s.status == sdstate.ACTIVE,
+                fail_condition=failed_state,
             )
         elif state == 'maintenance':
             sd_id = storage_domains_module.create()['id']
             storage_domains_module.post_create_check(sd_id)
             ret = storage_domains_module.action(
                 action='deactivate',
-                action_condition=lambda s: s.status == otypes.StorageDomainStatus.ACTIVE,
-                wait_condition=lambda s: s.status == otypes.StorageDomainStatus.MAINTENANCE,
+                action_condition=lambda s: s.status == sdstate.ACTIVE,
+                wait_condition=lambda s: s.status == sdstate.MAINTENANCE,
+                fail_condition=failed_state,
             )
+        elif state == 'unattached':
+            ret = storage_domains_module.create()
+            storage_domains_module.pre_remove(
+                storage_domain=storage_domains_service.service(ret['id']).get()
+            )
+            ret['changed'] = storage_domains_module.changed
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
-        module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
 
-from ansible.module_utils.basic import *
 if __name__ == "__main__":
     main()

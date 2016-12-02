@@ -1,38 +1,47 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import traceback
 
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
 except ImportError:
-    HAS_SDK = False
+    pass
 
-from ansible.module_utils.ovirt import *
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_sdk,
+    check_params,
+    create_connection,
+    equal,
+    ovirt_full_argument_spec,
+)
 
 
 DOCUMENTATION = '''
 ---
 module: ovirt_datacenters
 short_description: Module to manage data centers in oVirt
-version_added: "2.2"
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
     - "Module to manage data centers in oVirt"
@@ -63,6 +72,7 @@ options:
         description:
             - "Quota mode of the data center. One of I(disabled), I(audit) or I(enabled)"
         choices: ['disabled', 'audit', 'enabled']
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -73,7 +83,7 @@ EXAMPLES = '''
 - ovirt_datacenters:
     name: mydatacenter
     local: True
-    compatibility_version: 4.1
+    compatibility_version: 4.0
     quota_mode: enabled
 
 # Remove datacenter
@@ -81,6 +91,19 @@ EXAMPLES = '''
     state: absent
     name: mydatacenter
 '''
+
+RETURN = '''
+id:
+    description: "ID of the managed datacenter"
+    returned: "On success if datacenter is found."
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+data_center:
+    description: "Dictionary of all the datacenter attributes. Datacenter attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/datacenter."
+    returned: "On success if datacenter is found."
+'''
+
 
 class DatacentersModule(BaseModule):
 
@@ -114,13 +137,15 @@ class DatacentersModule(BaseModule):
         )
 
     def update_check(self, entity):
+        minor = self.__get_minor(self._module.params.get('compatibility_version'))
+        major = self.__get_major(self._module.params.get('compatibility_version'))
         return (
             equal(self._module.params.get('comment'), entity.comment) and
             equal(self._module.params.get('description'), entity.description) and
             equal(self._module.params.get('quota_mode'), str(entity.quota_mode)) and
             equal(self._module.params.get('local'), entity.local) and
-            equal(self.__get_minor(self._module.params.get('compatibility_version')), self.__get_minor(entity.version)) and
-            equal(self.__get_major(self._module.params.get('compatibility_version')), self.__get_major(entity.version))
+            equal(minor, self.__get_minor(entity.version)) and
+            equal(major, self.__get_major(entity.version))
         )
 
 
@@ -130,7 +155,7 @@ def main():
             choices=['present', 'absent'],
             default='present',
         ),
-        name=dict(default=None),
+        name=dict(default=None, required=True),
         description=dict(default=None),
         local=dict(type='bool'),
         compatibility_version=dict(default=None),
@@ -141,12 +166,10 @@ def main():
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
+    check_params(module)
 
     try:
-        # Create connection to engine and data centers service:
         connection = create_connection(module.params.pop('auth'))
         data_centers_service = connection.system_service().data_centers_service()
         clusters_module = DatacentersModule(
@@ -162,14 +185,11 @@ def main():
             ret = clusters_module.remove()
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
-        module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
 
-from ansible.module_utils.basic import *
 if __name__ == "__main__":
     main()

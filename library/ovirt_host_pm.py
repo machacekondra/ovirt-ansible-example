@@ -1,29 +1,29 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
 #
-
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+#
 
 try:
     import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
 except ImportError:
-    HAS_SDK = False
+    pass
 
 from ansible.module_utils.ovirt import *
 
@@ -32,7 +32,7 @@ DOCUMENTATION = '''
 ---
 module: ovirt_host_pm
 short_description: Module to manage power management of hosts in oVirt
-version_added: "2.2"
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
     - "Module to manage power management of hosts in oVirt."
@@ -44,8 +44,8 @@ options:
         aliases: ['host']
     state:
         description:
-            - "Should the host be present/absent/started/stopped/restarted"
-        choices: ['present', 'absent', 'started', 'stopped', 'restarted']
+            - "Should the host be present/absent."
+        choices: ['present', 'absent']
         default: present
     address:
         description:
@@ -58,8 +58,10 @@ options:
             - "Password of the user specified in C(username) parameter."
     type:
         description:
-            - "Type of the power management. oVirt predefined values are I(drac5), I(ilo), I(ipmilan), I(rsa),
-               I(bladecenter), I(alom), I(apc), I(eps), I(wti), I(rsb), but user can have defined custom type."
+            - "Type of the power management. oVirt predefined values are I(drac5), I(ipmilan), I(rsa),
+               I(bladecenter), I(alom), I(apc), I(apc_snmp), I(eps), I(wti), I(rsb), I(cisco_ucs),
+               I(drac7), I(hpblade), I(ilo), I(ilo2), I(ilo3), I(ilo4), I(ilo_ssh),
+               but user can have defined custom type."
     port:
         description:
             - "Power management interface port."
@@ -77,6 +79,7 @@ options:
     order:
         description:
             - "Integer value specifying, by default it's added at the end."
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -101,6 +104,18 @@ EXAMPLES = '''
     name: myhost
     address: 1.2.3.4
     type: ipmilan
+'''
+
+RETURN = '''
+id:
+    description: ID of the agent which is managed
+    returned: On success if agent is found.
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+agent:
+    description: "Dictionary of all the agent attributes. Agent attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/agent."
+    returned: On success if agent is found.
 '''
 
 
@@ -149,7 +164,7 @@ class HostPmModule(BaseModule):
 def main():
     argument_spec = ovirt_full_argument_spec(
         state=dict(
-            choices=['present', 'absent', 'started', 'stopped', 'restarted'],
+            choices=['present', 'absent'],
             default='present',
         ),
         name=dict(default=None, required=True, aliases=['host']),
@@ -166,9 +181,7 @@ def main():
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
 
     try:
         connection = create_connection(module.params.pop('auth'))
@@ -197,7 +210,7 @@ def main():
             )
             ret = host_pm_module.create(entity=agent)
 
-            # Enable Power Management, if it's not:
+            # Enable Power Management, if it's not enabled:
             host_module.create(entity=host)
         elif state == 'absent':
             agent = host_pm_module.search_entity(
@@ -209,11 +222,9 @@ def main():
             ret = host_pm_module.remove(entity=agent)
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
+    except Exception as e:
         module.fail_json(msg=str(e))
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
 from ansible.module_utils.basic import *

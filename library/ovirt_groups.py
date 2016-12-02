@@ -1,41 +1,50 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import traceback
 
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
 except ImportError:
-    HAS_SDK = False
+    pass
 
-from ansible.module_utils.ovirt import *
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_sdk,
+    check_params,
+    create_connection,
+    equal,
+    ovirt_full_argument_spec,
+)
 
 
 DOCUMENTATION = '''
 ---
 module: ovirt_groups
-short_description: Module to manage groups in oVirt/RHV
-version_added: "2.2"
+short_description: Module to manage groups in oVirt
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to manage groups in oVirt/RHV"
+    - "Module to manage groups in oVirt"
 options:
     name:
         description:
@@ -48,12 +57,14 @@ options:
         default: present
     authz_name:
         description:
-            - "Authorization provider of the group. Previously known as domain."
+            - "Authorization provider of the group. In previous versions of oVirt known as domain."
         required: true
+        aliases: ['domain']
     namespace:
         description:
             - "Namespace of the authorization provider, where group resides."
         required: false
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -80,6 +91,37 @@ ovirt_groups:
     domain: example.com-authz
 '''
 
+RETURN = '''
+id:
+    description: ID of the group which is managed
+    returned: On success if group is found.
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+group:
+    description: "Dictionary of all the group attributes. Group attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/group."
+    returned: On success if group is found.
+'''
+
+
+def _group(connection, module):
+    groups = connection.system_service().groups_service().list(
+        search="name={name}".format(
+            name=module.params['name'],
+        )
+    )
+
+    # If found more groups, filter them by namespace and authz name:
+    # (filtering here, as oVirt backend doesn't support it)
+    if len(groups) > 1:
+        groups = [
+            g for g in groups if (
+                equal(module.params['namespace'], g.namespace) and
+                equal(module.params['authz_name'], g.domain.name)
+            )
+        ]
+    return groups[0] if groups else None
+
 
 class GroupsModule(BaseModule):
 
@@ -100,16 +142,15 @@ def main():
             default='present',
         ),
         name=dict(required=True),
-        authz_name=dict(required=True),
+        authz_name=dict(required=True, aliases=['domain']),
         namespace=dict(default=None),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
+    check_params(module)
 
     try:
         connection = create_connection(module.params.pop('auth'))
@@ -119,49 +160,19 @@ def main():
             module=module,
             service=groups_service,
         )
-
-        group = None
-        if 'id' in module.params:
-            group = search_by_name(
-                service=groups_service,
-                name=module.params['name'],
-                namespace=module.params['namespace'],
-            )
-
+        group = _group(connection, module)
         state = module.params['state']
         if state == 'present':
-            # Passing `search_params` along with entity is hack here,
-            # because it's not possible to find group by it's namespace,
-            # and if group is not found by `search_by_name` method, by
-            # filtering object attributes, it should be found even,
-            # byt `create` method, that's why we need to pass everything
-            # here and not empty `search_params` otherwise only `name`
-            # would be used. In future if oVirt backend will support search
-            # by namespace, we can remove it:
-            ret = groups_module.create(
-                entity=group,
-                search_params={
-                    'name': module.params['name'],
-                    'namespace': module.params['namespace'],
-                }
-            )
+            ret = groups_module.create(entity=group)
         elif state == 'absent':
-            ret = groups_module.remove(
-                entity=group,
-                search_params={
-                    'name': module.params['name'],
-                    'namespace': module.params['namespace'],
-                }
-            )
+            ret = groups_module.remove(entity=group)
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
-        module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
-from ansible.module_utils.basic import *
+
 if __name__ == "__main__":
     main()

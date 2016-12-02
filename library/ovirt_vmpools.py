@@ -1,38 +1,49 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
 #
-
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+#
 
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
 except ImportError:
-    HAS_SDK = False
+    pass
 
-from ansible.module_utils.ovirt import *
+import traceback
+
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_params,
+    check_sdk,
+    create_connection,
+    equal,
+    get_link_name,
+    ovirt_full_argument_spec,
+    wait,
+)
 
 
 DOCUMENTATION = '''
 ---
 module: ovirt_vmpools
 short_description: Module to manage VM pools in oVirt
-version_added: "2.2"
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
     - "Module to manage VM pools in oVirt."
@@ -43,7 +54,8 @@ options:
         required: true
     state:
         description:
-            - "Should the VM pool be present/absent"
+            - "Should the VM pool be present/absent."
+            - "Note that when C(state) is I(absent) all VMs in VM pool are stopped and removed."
         choices: ['present', 'absent']
         default: present
     template:
@@ -77,11 +89,7 @@ options:
         description:
             - "Number of VMs in the pool."
             - "Default value is set by engine."
-    delete_protected:
-        description:
-            - "If I(True) VM pool will be set as delete protected."
-            - "If I(False) VM pool won't be set as delete protected."
-            - "If no value is passed, default value is set by oVirt engine."
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -97,11 +105,22 @@ EXAMPLES = '''
     prestarted: 2
     vm_per_user: 1
 
-# Remove vmpool
+# Remove vmpool, note that all VMs in pool will be stopped and removed:
 - ovirt_vmpools:
     state: absent
     name: myvmpool
-    force: true
+'''
+
+RETURN = '''
+id:
+    description: ID of the VM pool which is managed
+    returned: On success if VM pool is found.
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+vm_pool:
+    description: "Dictionary of all the VM pool attributes. VM pool attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/vm_pool."
+    returned: On success if VM pool is found.
 '''
 
 
@@ -121,7 +140,6 @@ class VmPoolsModule(BaseModule):
             max_user_vms=self._module.params['vm_per_user'],
             prestarted_vms=self._module.params['prestarted'],
             size=self._module.params['vm_count'],
-            delete_protected=self._module.params['delete_protected'],
             type=otypes.VmPoolType(
                 self._module.params['type']
             ) if self._module.params['type'] else None,
@@ -134,8 +152,7 @@ class VmPoolsModule(BaseModule):
             equal(self._module.params.get('comment'), entity.comment) and
             equal(self._module.params.get('vm_per_user'), entity.max_user_vms) and
             equal(self._module.params.get('prestarted'), entity.prestarted_vms) and
-            equal(self._module.params.get('vm_count'), entity.size) and
-            equal(self._module.params.get('delete_protected'), entity.delete_protected)
+            equal(self._module.params.get('vm_count'), entity.size)
         )
 
 
@@ -145,7 +162,7 @@ def main():
             choices=['present', 'absent'],
             default='present',
         ),
-        name=dict(default=None),
+        name=dict(default=None, required=True),
         template=dict(default=None),
         cluster=dict(default=None),
         description=dict(default=None),
@@ -154,8 +171,6 @@ def main():
         prestarted=dict(default=None, type='int'),
         vm_count=dict(default=None, type='int'),
         type=dict(default=None, choices=['automatic', 'manual']),
-        delete_protected=dict(type='bool'),
-        force=dict(type='bool'),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
@@ -165,7 +180,6 @@ def main():
     check_params(module)
 
     try:
-        # Create connection to engine and clusters service:
         connection = create_connection(module.params.pop('auth'))
         vm_pools_service = connection.system_service().vm_pools_service()
         vm_pools_module = VmPoolsModule(
@@ -177,17 +191,26 @@ def main():
         state = module.params['state']
         if state == 'present':
             ret = vm_pools_module.create()
+
+            # Wait for all VM pool VMs to be created:
+            if module.params['wait']:
+                vms_service = connection.system_service().vms_service()
+                for vm in vms_service.list(search='pool=%s' % module.params['name']):
+                    wait(
+                        service=vms_service.service(vm.id),
+                        condition=lambda vm: vm.status in [otypes.VmStatus.DOWN, otypes.VmStatus.UP],
+                        timeout=module.params['timeout'],
+                    )
+
         elif state == 'absent':
             ret = vm_pools_module.remove()
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
-        module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
-from ansible.module_utils.basic import *
+
 if __name__ == "__main__":
     main()

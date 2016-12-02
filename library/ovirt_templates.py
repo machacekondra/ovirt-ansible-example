@@ -1,41 +1,54 @@
-#!/usr/bin/python
+#!/usr/bin/pythonapi/
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import time
+import traceback
 
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
 except ImportError:
-    HAS_SDK = False
+    pass
 
-from ansible.module_utils.ovirt import *
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_sdk,
+    create_connection,
+    equal,
+    get_dict_of_struct,
+    get_link_name,
+    ovirt_full_argument_spec,
+    search_by_attributes,
+    search_by_name,
+)
 
 
 DOCUMENTATION = '''
 ---
 module: ovirt_templates
-short_description: Module to create/delete templates in oVirt/RHV
-version_added: "2.2"
+short_description: Module to manage virtual machine templates in oVirt
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to create/delete templates in oVirt/RHV"
+    - "Module to manage virtual machine templates in oVirt."
 options:
     name:
         description:
@@ -46,7 +59,7 @@ options:
             - "Should the template be present/absent/exported/imported"
         choices: ['present', 'absent', 'exported', 'imported']
         default: present
-    vm_name:
+    vm:
         description:
             - "Name of the VM, which will be used to create template."
     description:
@@ -64,7 +77,15 @@ options:
                same name should be overwritten."
     export_domain:
         description:
-            - "When C(state) is I(exported) this parameter specifies the name of the destination export storage domain."
+            - "When C(state) is I(exported) or I(imported) this parameter specifies the name of the
+               export storage domain."
+    image_provider:
+        description:
+            - "When C(state) is I(imported) this parameter specifies the name of the image provider to be used."
+    image_disk:
+        description:
+            - "When C(state) is I(imported) and C(image_provider) is used this parameter specifies the name of disk
+               to be imported as template."
     storage_domain:
         description:
             - "When C(state) is I(imported) this parameter specifies the name of the destination data storage domain."
@@ -74,6 +95,7 @@ options:
             will be copied to the created template."
             - "This parameter is used only when C(state) I(present)."
         default: False
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -84,7 +106,7 @@ EXAMPLES = '''
 - ovirt_templates:
     cluster: Default
     name: mytemplate
-    vm_name: rhel7
+    vm: rhel7
     cpu_profile: Default
     description: Test
 
@@ -102,6 +124,18 @@ EXAMPLES = '''
     name: mytemplate
 '''
 
+RETURN = '''
+id:
+    description: ID of the template which is managed
+    returned: On success if template is found.
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+template:
+    description: "Dictionary of all the template attributes. Template attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/template."
+    returned: On success if template is found.
+'''
+
 
 class TemplatesModule(BaseModule):
 
@@ -112,8 +146,8 @@ class TemplatesModule(BaseModule):
                 name=self._module.params['cluster']
             ) if self._module.params['cluster'] else None,
             vm=otypes.Vm(
-                name=self._module.params['vm_name']
-            ) if self._module.params['vm_name'] else None,
+                name=self._module.params['vm']
+            ) if self._module.params['vm'] else None,
             description=self._module.params['description'],
             cpu_profile=otypes.CpuProfile(
                 id=search_by_name(
@@ -131,14 +165,15 @@ class TemplatesModule(BaseModule):
         )
 
     def _get_export_domain_service(self):
+        provider_name = self._module.params['export_domain'] or self._module.params['image_provider']
         export_sds_service = self._connection.system_service().storage_domains_service()
-        export_sd = search_by_attributes(export_sds_service, name=self._module.params['export_domain'])
+        export_sd = search_by_name(export_sds_service, provider_name)
         if export_sd is None:
-            raise ValueError("Export storage domain '%s' wasn't found." % self._module.params['export_domain'])
+            raise ValueError(
+                "Export storage domain/Image Provider '%s' wasn't found." % provider_name
+            )
 
-        # Locate export storage domain templates service:
-        export_sd_service = export_sds_service.service(export_sd.id)
-        return export_sd_service
+        return export_sds_service.service(export_sd.id)
 
     def post_export_action(self, entity):
         self._service = self._get_export_domain_service().templates_service()
@@ -147,14 +182,26 @@ class TemplatesModule(BaseModule):
         self._service = self._connection.system_service().templates_service()
 
 
+def wait_for_import(module, templates_service):
+    if module.params['wait']:
+        start = time.time()
+        timeout = module.params['timeout']
+        poll_interval = module.params['poll_interval']
+        while time.time() < start + timeout:
+            template = search_by_name(templates_service, module.params['name'])
+            if template:
+                return template
+            time.sleep(poll_interval)
+
+
 def main():
     argument_spec = ovirt_full_argument_spec(
         state=dict(
             choices=['present', 'absent', 'exported', 'imported'],
             default='present',
         ),
-        name=dict(default=None),
-        vm_name=dict(default=None),
+        name=dict(default=None, required=True),
+        vm=dict(default=None),
         description=dict(default=None),
         cluster=dict(default=None),
         cpu_profile=dict(default=None),
@@ -163,17 +210,16 @@ def main():
         export_domain=dict(default=None),
         storage_domain=dict(default=None),
         exclusive=dict(type='bool'),
+        image_provider=dict(default=None),
+        image_disk=dict(default=None),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
 
     try:
-        # Create connection to engine and clusters service:
         connection = create_connection(module.params.pop('auth'))
         templates_service = connection.system_service().templates_service()
         templates_module = TemplatesModule(
@@ -202,36 +248,63 @@ def main():
                 wait_condition=lambda t: t is not None,
                 post_action=templates_module.post_export_action,
                 storage_domain=otypes.StorageDomain(id=export_service.get().id),
-                #exclusive=module.params['exclusive'],
+                exclusive=module.params['exclusive'],
             )
         elif state == 'imported':
             template = templates_module.search_entity()
-            export_service = templates_module._get_export_domain_service()
+            if template:
+                ret = templates_module.create(
+                    result_state=otypes.TemplateStatus.OK,
+                )
+            else:
+                kwargs = {}
+                if module.params['image_provider']:
+                    kwargs.update(
+                        disk=otypes.Disk(
+                            name=module.params['image_disk']
+                        ),
+                        template=otypes.Template(
+                            name=module.params['name'],
+                        ),
+                        import_as_template=True,
+                    )
 
-            templates_module._service = export_service.templates_service()
-            ret = templates_module.action(
-                entity=template,
-                action='import_',
-                action_condition=lambda t: template is None,
-                wait_condition=lambda t: t is not None and t.status == otypes.TemplateStatus.OK,
-                post_action=templates_module.post_import_action,
-                storage_domain=otypes.StorageDomain(
-                    name=module.params['storage_domain']
-                ) if module.params['storage_domain'] else None,
-                cluster=otypes.Cluster(
-                    name=module.params['cluster']
-                ) if module.params['cluster'] else None,
-                #exclusive=module.params['exclusive'],
-            )
+                if module.params['image_disk']:
+                    # We need to refresh storage domain to get list of images:
+                    templates_module._get_export_domain_service().images_service().list()
+
+                    glance_service = connection.system_service().openstack_image_providers_service()
+                    image_provider = search_by_name(glance_service, module.params['image_provider'])
+                    images_service = glance_service.service(image_provider.id).images_service()
+                else:
+                    images_service = templates_module._get_export_domain_service().templates_service()
+                template_name = module.params['image_disk'] or module.params['name']
+                entity = search_by_name(images_service, template_name)
+                if entity is None:
+                    raise Exception("Image/template '%s' was not found." % template_name)
+
+                images_service.service(entity.id).import_(
+                    storage_domain=otypes.StorageDomain(
+                        name=module.params['storage_domain']
+                    ) if module.params['storage_domain'] else None,
+                    cluster=otypes.Cluster(
+                        name=module.params['cluster']
+                    ) if module.params['cluster'] else None,
+                    **kwargs
+                )
+                template = wait_for_import(module, templates_service)
+                ret = {
+                    'changed': True,
+                    'id': template.id,
+                    'template': get_dict_of_struct(template),
+                }
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
-        module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
-from ansible.module_utils.basic import *
+
 if __name__ == "__main__":
     main()

@@ -1,47 +1,57 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
 #
-
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+#
 
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
 except ImportError:
-    HAS_SDK = False
+    pass
 
-from ansible.module_utils.ovirt import *
+import traceback
+
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_sdk,
+    create_connection,
+    equal,
+    get_link_name,
+    ovirt_full_argument_spec,
+    search_by_name,
+)
 
 
 DOCUMENTATION = '''
 ---
 module: ovirt_nics
 short_description: Module to manage network interfaces of Virtual Machines in oVirt
-version_added: "2.2"
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to manage network interfaces of Virtual Machines in oVirt"
+    - "Module to manage network interfaces of Virtual Machines in oVirt."
 options:
     name:
         description:
             - "Name of the network interface to manage."
         required: true
-    vm_name:
+    vm:
         description:
             - "Name of the Virtual Machine to manage."
         required: true
@@ -50,10 +60,13 @@ options:
             - "Should the Virtual Machine NIC be present/absent/plugged/unplugged."
         choices: ['present', 'absent', 'plugged', 'unplugged']
         default: present
+    network:
+        description:
+            - "Logical network to which the VM network interface should use,
+               by default Empty network is used if network is not specified."
     profile:
         description:
-            - "Virtual network interface profile to be attached to VM network interface,
-               by default Empty network is used if profile is not specified."
+            - "Virtual network interface profile to be attached to VM network interface."
     interface:
         description:
             - "Type of the network interface."
@@ -62,6 +75,7 @@ options:
     mac_address:
         description:
             - "Custom MAC address of the network interface, by default it's obtained from MAC pool."
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -71,47 +85,68 @@ EXAMPLES = '''
 # Add NIC to VM
 - ovirt_nics:
     state: present
-    vm_name: myvm
+    vm: myvm
     name: mynic
     interface: e1000
     mac_address: 00:1a:4a:16:01:56
     profile: ovirtmgmt
+    network: ovirtmgmt
 
 # Plug NIC to VM
 - ovirt_nics:
     state: plugged
-    vm_name: myvm
+    vm: myvm
     name: mynic
 
 # Unplug NIC from VM
 - ovirt_nics:
     state: unplugged
-    vm_name: myvm
+    vm: myvm
     name: mynic
 
 # Remove NIC from VM
 - ovirt_nics:
     state: absent
-    vm_name: myvm
+    vm: myvm
     name: mynic
+'''
+
+RETURN = '''
+id:
+    description: ID of the network interface which is managed
+    returned: On success if network interface is found.
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+nic:
+    description: "Dictionary of all the network interface attributes. Network interface attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/nic."
+    returned: On success if network interface is found.
 '''
 
 
 class VmNicsModule(BaseModule):
 
+    def __init__(self, *args, **kwargs):
+        super(VmNicsModule, self).__init__(*args, **kwargs)
+        self.vnic_id = None
+
+    @property
+    def vnic_id(self):
+        return self._vnic_id
+
+    @vnic_id.setter
+    def vnic_id(self, vnic_id):
+        self._vnic_id = vnic_id
+
     def build_entity(self):
-        profile = self._module.params.get('profile')
         return otypes.Nic(
             name=self._module.params.get('name'),
             interface=otypes.NicInterface(
                 self._module.params.get('interface')
             ) if self._module.params.get('interface') else None,
             vnic_profile=otypes.VnicProfile(
-                id=search_by_name(
-                    self._connection.system_service().vnic_profiles_service(),
-                    profile,
-                ).id
-            ) if profile else None,
+                id=self.vnic_id,
+            ) if self.vnic_id else None,
             mac=otypes.Mac(
                 address=self._module.params.get('mac_address')
             ) if self._module.params.get('mac_address') else None,
@@ -131,19 +166,18 @@ def main():
             choices=['present', 'absent', 'plugged', 'unplugged'],
             default='present'
         ),
-        vm_name=dict(required=True),
+        vm=dict(required=True),
         name=dict(required=True),
         interface=dict(default=None),
         profile=dict(default=None),
+        network=dict(default=None),
         mac_address=dict(default=None),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
 
     try:
         # Locate the service that manages the virtual machines and use it to
@@ -152,16 +186,31 @@ def main():
         vms_service = connection.system_service().vms_service()
 
         # Locate the VM, where we will manage NICs:
-        vm_name = module.params.get('vm_name')
+        vm_name = module.params.get('vm')
         vm = search_by_name(vms_service, vm_name)
+        if vm is None:
+            raise Exception("VM '%s' was not found." % vm_name)
 
         # Locate the service that manages the virtual machines NICs:
-        nics_service = vms_service.vm_service(vm.id).nics_service()
+        vm_service = vms_service.vm_service(vm.id)
+        nics_service = vm_service.nics_service()
         vmnics_module = VmNicsModule(
             connection=connection,
             module=module,
             service=nics_service,
         )
+
+        # Find vNIC id of the network interface (if any):
+        profile = module.params.get('profile')
+        if profile and module.params['network']:
+            cluster_name = get_link_name(connection, vm.cluster)
+            dcs_service = connection.system_service().data_centers_service()
+            dc = dcs_service.list(search='Clusters.name=%s' % cluster_name)[0]
+            networks_service = dcs_service.service(dc.id).networks_service()
+            network = search_by_name(networks_service, module.params['network'])
+            for vnic in connection.system_service().vnic_profiles_service().list():
+                if vnic.name == profile and vnic.network.id == network.id:
+                    vmnics_module.vnic_id = vnic.id
 
         # Handle appropriate action:
         state = module.params['state']
@@ -185,13 +234,10 @@ def main():
             )
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
-        module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
-from ansible.module_utils.basic import *
 if __name__ == "__main__":
     main()

@@ -203,9 +203,7 @@ def main():
             ('state', 'inpreview', ['snapshot_id']),
         ]
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
 
     vm_name = module.params.get('vm_name')
     connection = create_connection(module.params.pop('auth'))
@@ -228,8 +226,7 @@ def main():
         elif state == 'absent':
             ret = remove_snapshot(module, vm_service, snapshots_service)
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
+    except Exception as e:
         module.fail_json(msg=str(e))
     finally:
         # Close the connection to the server, don't revoke token:

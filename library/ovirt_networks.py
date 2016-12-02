@@ -1,41 +1,50 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-
 #
 # Copyright (c) 2016 Red Hat, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is part of Ansible
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import traceback
 
 try:
-    import ovirtsdk4 as sdk
     import ovirtsdk4.types as otypes
-    HAS_SDK = True
 except ImportError:
-    HAS_SDK = False
+    pass
 
-from ansible.module_utils.ovirt import *
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.ovirt import (
+    BaseModule,
+    check_sdk,
+    check_params,
+    create_connection,
+    equal,
+    ovirt_full_argument_spec,
+)
 
 
 DOCUMENTATION = '''
 ---
 module: ovirt_networks
-short_description: Module to create/delete networks in oVirt
-version_added: "2.2"
+short_description: Module to manage logical networks in oVirt
+version_added: "2.3"
 author: "Ondra Machacek (@machacekondra)"
 description:
-    - "Module to create/delete networks in oVirt"
+    - "Module to manage logical networks in oVirt"
 options:
     name:
         description:
@@ -46,7 +55,7 @@ options:
             - "Should the network be present or absent"
         choices: ['present', 'absent']
         default: present
-    datacenter_name:
+    datacenter:
         description:
             - "Datacenter name where network reside."
     description:
@@ -61,6 +70,10 @@ options:
     vm_network:
         description:
             - "If I(True) network will be marked as network for VM."
+    mtu:
+        description:
+            - "Maximum transmission unit (MTU) of the network."
+extends_documentation_fragment: ovirt
 '''
 
 EXAMPLES = '''
@@ -69,8 +82,7 @@ EXAMPLES = '''
 
 # Create network
 - ovirt_networks:
-    auth: "{{ ovirt_auth }}"
-    datacenter_name: mydatacenter
+    datacenter: mydatacenter
     name: mynetwork
     vlan_tag: 1
     vm_network: true
@@ -81,6 +93,19 @@ EXAMPLES = '''
     name: mynetwork
 '''
 
+RETURN = '''
+id:
+    description: "ID of the managed network"
+    returned: "On success if network is found."
+    type: str
+    sample: 7de90f31-222c-436c-a1ca-7e655bd5b60c
+network:
+    description: "Dictionary of all the network attributes. Network attributes can be found on your oVirt instance
+                  at following url: https://ovirt.example.com/ovirt-engine/api/model#types/network."
+    returned: "On success if network is found."
+'''
+
+
 class NetworksModule(BaseModule):
 
     def build_entity(self):
@@ -89,14 +114,15 @@ class NetworksModule(BaseModule):
             comment=self._module.params['comment'],
             description=self._module.params['description'],
             data_center=otypes.DataCenter(
-                name=self._module.params['datacenter_name'],
-            ) if self._module.params['datacenter_name'] else None,
+                name=self._module.params['datacenter'],
+            ) if self._module.params['datacenter'] else None,
             vlan=otypes.Vlan(
                 self._module.params['vlan_tag'],
             ) if self._module.params['vlan_tag'] else None,
             usages=[
                 otypes.NetworkUsage.VM if self._module.params['vm_network'] else None
             ] if self._module.params['vm_network'] is not None else None,
+            mtu=self._module.params['mtu'],
         )
 
     def update_check(self, entity):
@@ -104,7 +130,8 @@ class NetworksModule(BaseModule):
             equal(self._module.params.get('comment'), entity.comment) and
             equal(self._module.params.get('description'), entity.description) and
             equal(self._module.params.get('vlan_tag'), getattr(entity.vlan, 'id', None)) and
-            equal(self._module.params.get('vm_network'), True if entity.usages else False)
+            equal(self._module.params.get('vm_network'), True if entity.usages else False) and
+            equal(self._module.params.get('mtu'), entity.mtu)
         )
 
 
@@ -114,20 +141,20 @@ def main():
             choices=['present', 'absent'],
             default='present',
         ),
-        datacenter_name=dict(default=None),
-        name=dict(default=None),
+        datacenter=dict(default=None, required=True),
+        name=dict(default=None, required=True),
         description=dict(default=None),
         comment=dict(default=None),
         vlan_tag=dict(default=None, type='int'),
         vm_network=dict(default=None, type='bool'),
+        mtu=dict(default=None, type='int'),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
         supports_check_mode=True,
     )
-
-    if not HAS_SDK:
-        module.fail_json(msg='ovirtsdk4 is required for this module')
+    check_sdk(module)
+    check_params(module)
 
     try:
         connection = create_connection(module.params.pop('auth'))
@@ -141,7 +168,7 @@ def main():
         network = networks_module.search_entity(
             search_params={
                 'name': module.params['name'],
-                'datacenter': module.params['datacenter_name'],
+                'datacenter': module.params['datacenter'],
             },
         )
         if state == 'present':
@@ -150,13 +177,11 @@ def main():
             ret = networks_module.remove(entity=network)
 
         module.exit_json(**ret)
-    except sdk.Error as e:
-        # sdk.Error returns descriptive error message, just pass it to ansible
-        module.fail_json(msg=str(e))
+    except Exception as e:
+        module.fail_json(msg=str(e), exception=traceback.format_exc())
     finally:
-        # Close the connection to the server, don't revoke token:
         connection.close(logout=False)
 
-from ansible.module_utils.basic import *
+
 if __name__ == "__main__":
     main()
