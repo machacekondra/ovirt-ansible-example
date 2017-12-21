@@ -19,7 +19,18 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import os
+import time
 import traceback
+import ssl
+
+from httplib import HTTPSConnection
+
+try:
+    from urllib.parse import urlparse
+except ImportError:
+    from urlparse import urlparse
+
 
 try:
     import ovirtsdk4.types as otypes
@@ -68,6 +79,14 @@ options:
             - "Should the Virtual Machine disk be present/absent/attached/detached."
         choices: ['present', 'absent', 'attached', 'detached']
         default: 'present'
+    image_path:
+        description:
+            - "Path to disk image, which should be uploaded."
+            - "Note that currently we support only compability version 0.10 of the qcow disk."
+            - "Note that we check the idempotency by size of the disk.
+               If you want to forcibly update the disk, please send C(force)
+               parameter set to (true)."
+        version_added: "2.3"
     size:
         description:
             - "Size of the disk. Size should be specified using IEC standard units.
@@ -180,6 +199,73 @@ def _search_by_lun(disks_service, lun_id):
     return res[0] if res else None
 
 
+def upload_disk_image(connection, module):
+    disks_service = connection.system_service().disks_service()
+    disk_service = disks_service.disk_service(module.params['id'])
+    size = os.path.getsize(module.params['image_path'])
+    module.exit_json(x=size, y=disk_service.get().actual_size)
+    if size == disk_service.get().actual_size:
+        return False
+
+    transfers_service = connection.system_service().image_transfers_service()
+    transfer = transfers_service.add(
+        otypes.ImageTransfer(
+            image=otypes.Image(
+                id=module.params['id'],
+            )
+         )
+    )
+    transfer_service = transfers_service.image_transfer_service(transfer.id)
+
+    try:
+        # After adding a new transfer for the disk, the transfer's status will be INITIALIZING.
+        # Wait until the init phase is over. The actual transfer can start when its status is "Transferring".
+        while transfer.phase == otypes.ImageTransferPhase.INITIALIZING:
+            time.sleep(3)
+            transfer = transfer_service.get()
+
+        # Set needed headers for uploading:
+        upload_headers = {
+            'Authorization': transfer.signed_ticket,
+        }
+
+        proxy_url = urlparse(transfer.proxy_url)
+        context = ssl.create_default_context()
+        auth = module.params['auth']
+        if auth.get('insecure'):
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        elif auth.get('ca_file'):
+            context.load_verify_locations(cafile='ca.pem')
+
+        proxy_connection = HTTPSConnection(
+            proxy_url.hostname,
+            proxy_url.port,
+            context=context,
+        )
+
+        with open(module.params['image_path'], "rb") as disk:
+            chunk_size = 1024 * 1024 * 8
+            pos = 0
+            while pos < size:
+                transfer_service.extend()
+                upload_headers['Content-Range'] = "bytes %d-%d/%d" % (pos, min(pos + chunk_size, size) - 1, size)
+                proxy_connection.request(
+                    'PUT',
+                    proxy_url.path,
+                    disk.read(chunk_size),
+                    headers=upload_headers,
+                )
+                r = proxy_connection.getresponse()
+                if r.status >= 400:
+                    raise Exception("Failed to upload disk image.")
+                pos += chunk_size
+    finally:
+        transfer_service.finalize()
+
+    return True
+
+
 class DisksModule(BaseModule):
 
     def build_entity(self):
@@ -235,6 +321,7 @@ class DisksModule(BaseModule):
                 storage_domain=otypes.StorageDomain(
                     id=new_disk_storage.id,
                 ),
+                post_action=lambda _: time.sleep(self._module.params['poll_interval']),
             )['changed']
 
         if self._module.params['storage_domains']:
@@ -255,7 +342,6 @@ class DisksModule(BaseModule):
         return (
             equal(self._module.params.get('description'), entity.description) and
             equal(convert_to_bytes(self._module.params.get('size')), entity.provisioned_size) and
-            equal(self._module.params.get('format'), str(entity.format)) and
             equal(self._module.params.get('shareable'), entity.shareable)
         )
 
@@ -295,10 +381,11 @@ def main():
         storage_domain=dict(default=None),
         storage_domains=dict(default=None, type='list'),
         profile=dict(default=None),
-        format=dict(default=None, choices=['raw', 'cow']),
+        format=dict(default='cow', choices=['raw', 'cow']),
         bootable=dict(default=None, type='bool'),
         shareable=dict(default=None, type='bool'),
         logical_unit=dict(default=None, type='dict'),
+        image_path=dict(default=None),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
@@ -310,7 +397,7 @@ def main():
     try:
         disk = None
         state = module.params['state']
-        connection = create_connection(module.params.pop('auth'))
+        connection = create_connection(module.params.get('auth'))
         disks_service = connection.system_service().disks_service()
         disks_module = DisksModule(
             connection=connection,
@@ -333,6 +420,10 @@ def main():
             # We need to pass ID to the module, so in case we want detach/attach disk
             # we have this ID specified to attach/detach method:
             module.params['id'] = ret['id'] if disk is None else disk.id
+
+            if module.params['image_path']:
+                uploaded = upload_disk_image(connection, module)
+                ret['changed'] = ret['changed'] or uploaded
         elif state == 'absent':
             ret = disks_module.remove()
 

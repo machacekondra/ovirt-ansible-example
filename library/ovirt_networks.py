@@ -34,6 +34,7 @@ from ansible.module_utils.ovirt import (
     create_connection,
     equal,
     ovirt_full_argument_spec,
+    search_by_name,
 )
 
 
@@ -70,9 +71,20 @@ options:
     vm_network:
         description:
             - "If I(True) network will be marked as network for VM."
+            - "VM network carries traffic relevant to the virtual machine."
     mtu:
         description:
             - "Maximum transmission unit (MTU) of the network."
+    clusters:
+        description:
+            - "List of dictionaries describing how the network is managed in specific cluster."
+            - "C(name) - Cluster name."
+            - "C(assigned) - I(true) if the network should be assigned to cluster. Default is I(true)."
+            - "C(required) - I(true) if the network must remain operational for all hosts associated with this network."
+            - "C(display) - I(true) if the network should marked as display network."
+            - "C(migration) - I(true) if the network should marked as migration network."
+            - "C(gluster) - I(true) if the network should marked as gluster network."
+
 extends_documentation_fragment: ovirt
 '''
 
@@ -135,6 +147,50 @@ class NetworksModule(BaseModule):
         )
 
 
+class ClusterNetworksModule(BaseModule):
+
+    def __init__(self, network_id, cluster_network, *args, **kwargs):
+        super(ClusterNetworksModule, self).__init__(*args, **kwargs)
+        self._network_id = network_id
+        self._cluster_network = cluster_network
+
+    def build_entity(self):
+        return otypes.Network(
+            id=self._network_id,
+            name=self._module.params['name'],
+            required=self._cluster_network.get('required'),
+            display=self._cluster_network.get('display'),
+            usages=[
+                otypes.NetworkUsage(usage)
+                for usage in ['display', 'gluster', 'migration']
+                if self._cluster_network.get(usage, False)
+            ] if (
+                self._cluster_network.get('display') is not None or
+                self._cluster_network.get('gluster') is not None or
+                self._cluster_network.get('migration') is not None
+            ) else None,
+        )
+
+    def update_check(self, entity):
+        return (
+            equal(self._cluster_network.get('required'), entity.required) and
+            equal(self._cluster_network.get('display'), entity.display) and
+            equal(
+                sorted([
+                    usage
+                    for usage in ['display', 'gluster', 'migration']
+                    if self._cluster_network.get(usage, False)
+                ]),
+                sorted([
+                    str(usage)
+                    for usage in getattr(entity, 'usages', [])
+                    # VM + MANAGEMENT is part of root network
+                    if usage != otypes.NetworkUsage.VM and usage != otypes.NetworkUsage.MANAGEMENT
+                ]),
+            )
+        )
+
+
 def main():
     argument_spec = ovirt_full_argument_spec(
         state=dict(
@@ -148,6 +204,7 @@ def main():
         vlan_tag=dict(default=None, type='int'),
         vm_network=dict(default=None, type='bool'),
         mtu=dict(default=None, type='int'),
+        clusters=dict(default=None, type='list'),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
@@ -158,6 +215,7 @@ def main():
 
     try:
         connection = create_connection(module.params.pop('auth'))
+        clusters_service = connection.system_service().clusters_service()
         networks_service = connection.system_service().networks_service()
         networks_module = NetworksModule(
             connection=connection,
@@ -173,6 +231,25 @@ def main():
         )
         if state == 'present':
             ret = networks_module.create(entity=network)
+
+            # Update clusters networks:
+            for param_cluster in module.params.get('clusters', []):
+                cluster = search_by_name(clusters_service, param_cluster.get('name', None))
+                if cluster is None:
+                    raise Exception("Cluster '%s' was not found." % cluster_name)
+                cluster_networks_service = clusters_service.service(cluster.id).networks_service()
+                cluster_networks_module = ClusterNetworksModule(
+                    network_id=ret['id'],
+                    cluster_network=param_cluster,
+                    connection=connection,
+                    module=module,
+                    service=cluster_networks_service,
+                )
+                if param_cluster.get('assigned', True):
+                    ret = cluster_networks_module.create()
+                else:
+                    ret = cluster_networks_module.remove()
+
         elif state == 'absent':
             ret = networks_module.remove(entity=network)
 

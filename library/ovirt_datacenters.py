@@ -34,6 +34,7 @@ from ansible.module_utils.ovirt import (
     create_connection,
     equal,
     ovirt_full_argument_spec,
+    search_by_name,
 )
 
 
@@ -72,6 +73,12 @@ options:
         description:
             - "Quota mode of the data center. One of I(disabled), I(audit) or I(enabled)"
         choices: ['disabled', 'audit', 'enabled']
+    mac_pool:
+        description:
+            - "MAC pool to be used by this datacenter."
+            - "IMPORTANT: This option is deprecated in oVirt 4.1. You should
+               use C(mac_pool) in C(ovirt_clusters) module, as MAC pools are
+               set per cluster since 4.1."
 extends_documentation_fragment: ovirt
 '''
 
@@ -121,11 +128,24 @@ class DatacentersModule(BaseModule):
             return full_version.minor
         return int(full_version.split('.')[1])
 
+    def _get_mac_pool(self):
+        mac_pool = None
+        if self._module.params.get('mac_pool'):
+            mac_pool = search_by_name(
+                self._connection.system_service().mac_pools_service(),
+                self._module.params.get('mac_pool'),
+            )
+
+        return mac_pool
+
     def build_entity(self):
         return otypes.DataCenter(
             name=self._module.params['name'],
             comment=self._module.params['comment'],
             description=self._module.params['description'],
+            mac_pool=otypes.MacPool(
+                id=getattr(self._get_mac_pool(), 'id', None),
+            ) if self._module.params.get('mac_pool') else None,
             quota_mode=otypes.QuotaModeType(
                 self._module.params['quota_mode']
             ) if self._module.params['quota_mode'] else None,
@@ -140,6 +160,7 @@ class DatacentersModule(BaseModule):
         minor = self.__get_minor(self._module.params.get('compatibility_version'))
         major = self.__get_major(self._module.params.get('compatibility_version'))
         return (
+            equal(getattr(self._get_mac_pool(), 'id', None), getattr(entity.mac_pool, 'id', None)) and
             equal(self._module.params.get('comment'), entity.comment) and
             equal(self._module.params.get('description'), entity.description) and
             equal(self._module.params.get('quota_mode'), str(entity.quota_mode)) and
@@ -161,6 +182,7 @@ def main():
         compatibility_version=dict(default=None),
         quota_mode=dict(choices=['disabled', 'audit', 'enabled']),
         comment=dict(default=None),
+        mac_pool=dict(default=None),
     )
     module = AnsibleModule(
         argument_spec=argument_spec,

@@ -1,0 +1,6 @@
+---
+- name: Setup env
+  hosts: all
+
+  roles:
+    - oVirt.infra
